@@ -1,0 +1,146 @@
+"""
+Application settings and configuration management.
+
+Uses Pydantic Settings for validation and environment variable support.
+"""
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class BotSettings(BaseSettings):
+    """Discord bot configuration."""
+
+    name: str = Field(default="DragonWizard", description="Bot display name")
+    command_prefix: str = Field(default="!", description="Command prefix for bot commands")
+
+
+class LLMSettings(BaseSettings):
+    """LLM API configuration."""
+
+    provider: Literal["anthropic", "openai"] = Field(
+        default="anthropic", description="LLM provider to use"
+    )
+    model: str = Field(
+        default="claude-3-5-sonnet-20241022", description="Model identifier"
+    )
+    max_tokens: int = Field(default=1024, description="Maximum tokens in response")
+    temperature: float = Field(default=0.3, description="Sampling temperature")
+    api_key: str = Field(default="", description="API key for LLM provider")
+
+    model_config = SettingsConfigDict(env_prefix="LLM_")
+
+
+class RAGSettings(BaseSettings):
+    """RAG engine configuration."""
+
+    vector_db: Literal["chromadb"] = Field(
+        default="chromadb", description="Vector database to use"
+    )
+    chunk_size: int = Field(default=512, description="Document chunk size in tokens")
+    chunk_overlap: int = Field(default=50, description="Overlap between chunks")
+    retrieval_k: int = Field(default=5, description="Number of chunks to retrieve")
+
+    # Local embeddings configuration (Sentence Transformers)
+    embedding_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        description="Sentence Transformers model name (local, no API key needed)"
+    )
+    embedding_device: Literal["cpu", "cuda"] = Field(
+        default="cpu",
+        description="Device for embedding generation (cpu or cuda)"
+    )
+    embedding_batch_size: int = Field(
+        default=32,
+        description="Batch size for embedding generation"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="RAG_")
+
+
+class FeatureFlags(BaseSettings):
+    """Feature toggles for optional functionality."""
+
+    character_sheets: bool = Field(
+        default=False, description="Enable character sheet features"
+    )
+    campaign_context: bool = Field(
+        default=False, description="Enable campaign-specific context"
+    )
+    session_memory: bool = Field(
+        default=False, description="Enable conversation session memory"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="FEATURE_")
+
+
+class ToolSettings(BaseSettings):
+    """External tool configuration."""
+
+    dice_server: str = Field(
+        default="mcp://dice-roller", description="MCP dice server URI"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="TOOL_")
+
+
+class Settings(BaseSettings):
+    """Main application settings."""
+
+    # Environment
+    environment: Literal["development", "production"] = Field(
+        default="development", description="Deployment environment"
+    )
+
+    # Logging
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO", description="Logging level"
+    )
+    log_file: Path | None = Field(default=None, description="Log file path")
+
+    # Sub-configurations
+    bot: BotSettings = Field(default_factory=BotSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    rag: RAGSettings = Field(default_factory=RAGSettings)
+    features: FeatureFlags = Field(default_factory=FeatureFlags)
+    tools: ToolSettings = Field(default_factory=ToolSettings)
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+    )
+
+
+# Global settings instance
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    """Get or create the global settings instance."""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+def load_settings(env_file: str | Path | None = None) -> Settings:
+    """
+    Load settings from file and environment.
+
+    Args:
+        env_file: Path to .env file (optional)
+
+    Returns:
+        Loaded settings instance
+    """
+    global _settings
+    if env_file:
+        _settings = Settings(_env_file=env_file)
+    else:
+        _settings = Settings()
+    return _settings
