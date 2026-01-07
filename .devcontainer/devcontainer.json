@@ -1,0 +1,52 @@
+{
+	"name": "DragonWizard Development",
+	"image": "mcr.microsoft.com/devcontainers/python:3.13",
+
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "20"
+		},
+		"ghcr.io/devcontainers/features/git:1": {},
+		"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-python.black-formatter",
+				"charliermarsh.ruff",
+				"tamasfe.even-better-toml",
+				"GitHub.copilot"
+			],
+			"settings": {
+				"python.defaultInterpreterPath": "/usr/local/bin/python",
+				"python.terminal.activateEnvironment": true,
+				"python.testing.pytestEnabled": true,
+				"python.testing.unittestEnabled": false,
+				"editor.formatOnSave": true,
+				"editor.defaultFormatter": "ms-python.black-formatter",
+				"[python]": {
+					"editor.codeActionsOnSave": {
+						"source.organizeImports": "explicit"
+					}
+				}
+			}
+		}
+	},
+
+	"postCreateCommand": "bash .devcontainer/setup.sh",
+
+	"remoteUser": "vscode",
+
+	"mounts": [
+		"source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+	],
+
+	"forwardPorts": [],
+
+	"runArgs": [
+		"--name=dragonwizard-dev"
+	]
+}

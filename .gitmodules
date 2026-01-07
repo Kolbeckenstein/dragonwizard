@@ -1,0 +1,3 @@
+[submodule "external/dice-rolling-mcp"]
+	path = external/dice-rolling-mcp
+	url = https://github.com/jimmcq/dice-rolling-mcp.git

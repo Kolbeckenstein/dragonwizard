@@ -31,10 +31,33 @@ The all-MiniLM-L6-v2 embedding model runs efficiently on CPU - no GPU required!
 
 ### Prerequisites
 
+**Option 1: Dev Container (Recommended)**
+- [Docker](https://www.docker.com/products/docker-desktop)
+- [VS Code](https://code.visualstudio.com/) with [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+**Option 2: Local Installation**
 - Python 3.13+
 - [uv](https://github.com/astral-sh/uv) package manager
+- Node.js 20+ and npm (for MCP dice server)
 
 ### Installation
+
+**Option 1: Dev Container (Easiest)**
+
+1. Install Docker and VS Code with Dev Containers extension
+2. Clone and open the repository:
+```bash
+git clone <repository-url>
+cd dragonwizard
+code .
+```
+3. When prompted, click "Reopen in Container" (or press F1 → "Dev Containers: Reopen in Container")
+4. Wait for automatic setup (~5 minutes first time)
+5. Done! All dependencies are installed and configured.
+
+See [.devcontainer/README.md](.devcontainer/README.md) for details.
+
+**Option 2: Local Installation**
 
 1. Clone the repository:
 ```bash
@@ -42,18 +65,25 @@ git clone <repository-url>
 cd dragonwizard
 ```
 
-2. Install dependencies with uv:
+2. Run complete setup:
 ```bash
-uv sync
+make setup
 ```
 
-3. Set up your environment:
+Or install manually:
 ```bash
+# Install Python dependencies
+uv sync
+
+# Build MCP dice server
+make install-dice-server
+
+# Set up environment
 cp .env.example .env
 # Edit .env and add your API keys
 ```
 
-4. Verify installation:
+3. Verify installation:
 ```bash
 uv run dragonwizard --version
 ```
