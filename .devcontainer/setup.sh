@@ -15,6 +15,10 @@ node --version
 npm --version
 uv --version
 
+# Install Tesseract OCR engine (needed for scanned PDF processing)
+echo "📄 Installing Tesseract OCR..."
+sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng > /dev/null
+
 # Initialize git submodules
 echo "📥 Initializing git submodules..."
 git submodule update --init --recursive

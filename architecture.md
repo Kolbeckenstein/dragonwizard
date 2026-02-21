@@ -131,11 +131,25 @@ validate_query(query: str) -> bool
 - Retrieve top-k relevant document chunks
 - Rank and filter results by relevance
 
-**Data Sources**:
-- D&D 5e System Reference Document (SRD)
-- Rules compendiums (legally obtained)
-- Community-curated FAQs and errata
+**Data Sources (Current)**:
+- D&D 5e rulebook PDFs (including scanned pages via OCR fallback)
+
+**Data Sources (Planned — phased by data source)**:
+- 5e SRD web scrape (https://5e.tools or official SRD page) — plain HTML, no login needed
+- D&D Beyond forums — rules Q&A threads, paired as question+answer embeddings
 - Future: homebrew content, campaign-specific rules
+
+**Ingestion Pipeline Architecture**:
+The pipeline is designed to be extensible to new data sources. Each source type
+implements the `DocumentLoader` interface and is registered in `IngestionPipeline`.
+Current loaders: `TextLoader`, `MarkdownLoader`, `PDFLoader` (with OCR).
+Planned loaders: `SRDWebLoader`, `ForumLoader` (with paired Q&A embeddings).
+
+**Paired Q&A Embedding Strategy** (for forum data):
+Forum threads contain expert rules interpretations. Rather than embedding the full
+thread, we embed the *question* (which users' queries resemble) and return the
+*answer* as context. This bridges the vocabulary gap between user queries and
+rulebook language. Schema: `{question: str, answer: str, source_url: str, votes: int}`.
 
 **Key Operations**:
 ```
@@ -364,7 +378,7 @@ temperature = 0.3
 vector_db = "chromadb"
 chunk_size = 512
 chunk_overlap = 50
-retrieval_k = 5
+default_k = 5
 
 [features]
 character_sheets = false  # Enable when ready
@@ -455,6 +469,51 @@ dice_server = "mcp://dice-roller"
 - **Cost**: API costs per 1000 queries
 - **User Satisfaction**: Feedback from Discord users
 - **Reliability**: Uptime and error rates
+
+---
+
+## Future Enhancement Backlog
+
+A living list of potential improvements, collected during development. Not prioritized—ideas to explore when the core is stable.
+
+### RAG & Retrieval Enhancements
+
+| Enhancement | Description | Complexity | Value |
+|-------------|-------------|------------|-------|
+| **Cross-encoder reranking** | After vector search returns top-50 candidates, apply a cross-encoder model (e.g., `cross-encoder/ms-marco-MiniLM-L-6-v2`) for more precise ranking. Adds ~100-500ms latency but significantly improves result quality for ambiguous queries. | Medium | High |
+| **Hybrid search** | Combine semantic search with BM25 keyword search. Helps when users search for exact spell names or rule terms. | Medium | Medium |
+| **Query expansion** | Automatically expand queries with D&D synonyms (e.g., "fireball" → "fireball fire evocation spell damage"). Could use LLM or static thesaurus. | Low | Medium |
+| **D&D acronym dictionary** | Static synonym map for common D&D acronyms (AC→armor class, HP→hit points, DC→difficulty class, DM→dungeon master). <1ms latency, zero drift risk. | Low | High |
+| **Multi-vector retrieval** | Store multiple embeddings per chunk (e.g., one for content, one for metadata/title). Query against both. | High | Medium |
+| **Contextual chunk headers** | Prepend parent document title/section to each chunk before embedding, improving retrieval accuracy. | Low | Medium |
+
+### LLM & Response Quality
+
+| Enhancement | Description | Complexity | Value |
+|-------------|-------------|------------|-------|
+| **Response caching** | Cache common Q&A pairs (e.g., "how does advantage work?") to reduce API costs and latency. | Low | High |
+| **Streaming responses** | Stream LLM output to Discord for faster perceived latency on long responses. | Medium | Medium |
+| **Confidence scoring** | Have LLM output confidence level; show disclaimers for low-confidence answers. | Low | Low |
+| **Multi-turn memory** | Maintain conversation context across messages in the same channel/thread. | Medium | High |
+
+### Data & Content
+
+| Enhancement | Description | Complexity | Value |
+|-------------|-------------|------------|-------|
+| **5e SRD web scraper** | Scrape the 5e SRD (5e.tools or official WotC page) into structured documents. Implement as `SRDWebLoader(DocumentLoader)` with configurable base URL so alternative SRD mirrors can be swapped in. | Medium | High |
+| **D&D Beyond forum scraper** | Scrape D&D Beyond rules Q&A forum threads. Implement as `ForumLoader(DocumentLoader)` producing paired `{question, answer}` documents. Architecture: paginated thread list → thread detail → extract accepted/top-voted answer pairs. | High | High |
+| **Paired Q&A embeddings** | For forum Q&A pairs, embed the *question* text for retrieval matching (closer to how users phrase queries) while storing the full Q+A as context. Requires a new `ForumChunk` type with `question_embedding` and `answer_text` fields in the vector store schema. | Medium | High |
+| **Automatic errata ingestion** | Monitor official errata sources and update vector store automatically. | Medium | Medium |
+| **Homebrew content support** | Allow server admins to upload custom rules with proper namespacing. | High | Medium |
+| **Source attribution UI** | Rich embeds showing exact page numbers, book covers, hyperlinks to D&D Beyond. | Low | Medium |
+
+### Infrastructure
+
+| Enhancement | Description | Complexity | Value |
+|-------------|-------------|------------|-------|
+| **GPU-accelerated embeddings** | Use CUDA for faster batch embedding during ingestion. | Low | Low |
+| **Distributed vector store** | Migrate to Pinecone/Weaviate for multi-instance deployments. | High | Low |
+| **Prometheus metrics** | Export query latency, cache hit rates, token usage for monitoring. | Medium | Medium |
 
 ---
 

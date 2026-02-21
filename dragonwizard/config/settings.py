@@ -40,9 +40,26 @@ class RAGSettings(BaseSettings):
     vector_db: Literal["chromadb"] = Field(
         default="chromadb", description="Vector database to use"
     )
+    collection_name: str = Field(
+        default="dragonwizard", description="ChromaDB collection name"
+    )
     chunk_size: int = Field(default=512, description="Document chunk size in tokens")
     chunk_overlap: int = Field(default=50, description="Overlap between chunks")
-    retrieval_k: int = Field(default=5, description="Number of chunks to retrieve")
+    default_k: int = Field(default=5, description="Number of chunks to retrieve")
+    score_threshold: float | None = Field(
+        default=None,
+        description="Minimum similarity score (0.0-1.0). None means no filtering.",
+    )
+
+    # Data paths
+    vector_db_path: str = Field(
+        default="data/vector_db",
+        description="Path to vector database storage"
+    )
+    processed_data_path: str = Field(
+        default="data/processed",
+        description="Path to store processing metadata"
+    )
 
     # Local embeddings configuration (Sentence Transformers)
     embedding_model: str = Field(
@@ -56,6 +73,12 @@ class RAGSettings(BaseSettings):
     embedding_batch_size: int = Field(
         default=32,
         description="Batch size for embedding generation"
+    )
+
+    # OCR configuration
+    ocr_enabled: bool = Field(
+        default=True,
+        description="Enable OCR fallback for scanned PDF pages (requires tesseract-ocr)"
     )
 
     model_config = SettingsConfigDict(env_prefix="RAG_")
@@ -113,6 +136,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
+        extra="ignore",  # Ignore extra fields from .env (for future expansion)
     )
 
 

@@ -11,3 +11,7 @@ wheels/
 .env
 *.log
 logs/
+
+
+# Downloaded datasets
+data/

@@ -33,6 +33,8 @@ class DiceRollerTool(ToolAdapter):
         self._session = None
         self._read_stream = None
         self._write_stream = None
+        self._stdio_context = None
+        self._session_context = None
 
         # Determine server path
         if server_path is None:
@@ -59,11 +61,13 @@ class DiceRollerTool(ToolAdapter):
             args=[str(server_path)]
         )
 
-        # Start the MCP server subprocess
-        self._read_stream, self._write_stream = await stdio_client(server_params).__aenter__()
+        # Start the MCP server subprocess and store context manager
+        self._stdio_context = stdio_client(server_params)
+        self._read_stream, self._write_stream = await self._stdio_context.__aenter__()
 
-        # Create and initialize the client session
-        self._session = await ClientSession(self._read_stream, self._write_stream).__aenter__()
+        # Create and initialize the client session and store context manager
+        self._session_context = ClientSession(self._read_stream, self._write_stream)
+        self._session = await self._session_context.__aenter__()
 
         # Perform MCP initialization handshake
         await self._session.initialize()
@@ -73,16 +77,70 @@ class DiceRollerTool(ToolAdapter):
 
     async def shutdown(self) -> None:
         """Cleanly shut down the MCP server subprocess."""
-        raise NotImplementedError("Not yet implemented")
+        if not self._initialized:
+            return  # Already shut down or never initialized
+
+        # Exit the session context manager (closes session)
+        if self._session_context is not None:
+            await self._session_context.__aexit__(None, None, None)
+            self._session_context = None
+            self._session = None
+
+        # Exit the stdio context manager (terminates subprocess)
+        if self._stdio_context is not None:
+            await self._stdio_context.__aexit__(None, None, None)
+            self._stdio_context = None
+            self._read_stream = None
+            self._write_stream = None
+
+        # Mark as no longer initialized
+        self._initialized = False
+
+    async def __aenter__(self):
+        """Async context manager entry - initialize the tool."""
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, *_args):
+        """Async context manager exit - shutdown the tool."""
+        await self.shutdown()
+        return None  # Don't suppress exceptions
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call a tool on the MCP server."""
         if not self._initialized:
             raise RuntimeError("Tool adapter not initialized")
-        raise NotImplementedError("Not yet implemented")
+
+        # Call the tool on the MCP server
+        result = await self._session.call_tool(tool_name, arguments)
+
+        # Extract text from the result content
+        # MCP returns content as a list of content blocks
+        text_parts = []
+        for content in result.content:
+            if hasattr(content, "text"):
+                text_parts.append(content.text)
+
+        # Return formatted result compatible with our tool interface
+        return {
+            "text": " ".join(text_parts) if text_parts else ""
+        }
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """List available tools from the MCP server."""
         if not self._initialized:
             raise RuntimeError("Tool adapter not initialized")
-        raise NotImplementedError("Not yet implemented")
+
+        # Call the MCP server's list_tools method
+        result = await self._session.list_tools()
+
+        # Convert MCP tools to dictionaries compatible with Claude API
+        tools = []
+        for tool in result.tools:
+            tools.append({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.inputSchema,
+            })
+
+        return tools
