@@ -7,6 +7,8 @@ This module defines the core data structures used throughout the RAG pipeline:
 - Document: Represents a loaded source document
 - Chunk: Represents a piece of a document with embeddings
 - SearchResult: Represents a retrieved chunk with similarity score
+- ChunkEnricher: Abstract base class for chunk post-processors
+- NoOpEnricher: Identity enricher (null-object implementation of ChunkEnricher)
 - DocumentLoader: Abstract base class for loading different file formats
 """
 
@@ -30,6 +32,11 @@ class DocumentMetadata(BaseModel):
     title: str = Field(description="Document title (from metadata or filename)")
     author: str | None = Field(None, description="Document author (if available)")
     page_count: int | None = Field(None, ge=1, description="Number of pages (PDFs only)")
+    edition: str | None = Field(
+        None,
+        description='D&D edition, e.g. "5e" (2014 rules) or "5.5e" (2024 rules). '
+                    'Inferred from source directory at ingestion time.',
+    )
 
     model_config = ConfigDict(extra="allow")  # Allow extra fields for future extensibility
 
@@ -59,6 +66,12 @@ class ChunkMetadata(BaseModel):
     section: str | None = Field(None, description="Section heading (if detected)")
     char_start: int | None = Field(None, ge=0, description="Character offset in source document")
     char_end: int | None = Field(None, gt=0, description="Character end offset in source document")
+    edition: str | None = Field(
+        None,
+        description='D&D edition tag, e.g. "5e" or "5.5e". Stored in ChromaDB and used for '
+                    'metadata-level filtering: engine.search(filters={"edition": "5e"}). '
+                    'None for documents not organised into an edition directory.',
+    )
 
     # Tracking fields
     ingestion_timestamp: datetime = Field(
@@ -194,6 +207,67 @@ class SearchResult(BaseModel):
     score: float = Field(ge=0.0, le=1.0, description="Similarity score (0.0 to 1.0)")
     metadata: ChunkMetadata = Field(description="Chunk metadata")
     citation: str = Field(description="Formatted citation string for LLM prompts")
+
+
+class ChunkEnricher(ABC):
+    """
+    Abstract base class for chunk enrichers.
+
+    Chunk enrichers post-process chunks after the chunking step and before
+    embedding. Each enricher receives the full list of chunks plus the source
+    document, and returns a (possibly modified) list of chunks.
+
+    Enrichers must NOT mutate input chunks — use chunk.model_copy(update={...})
+    to produce new Chunk instances (Pydantic v2 pattern).
+
+    Async is required because some enrichers (e.g. LLMHeadingEnricher) call
+    an LLM API inside enrich().
+
+    Example:
+        >>> class NoOpEnricher(ChunkEnricher):
+        ...     async def enrich(self, chunks, document):
+        ...         return chunks  # identity
+
+    Intended enrichers:
+        - NoOpEnricher: identity, for baseline comparisons
+        - StatisticalHeadingEnricher: font-size heuristic heading injection
+        - LLMHeadingEnricher: statistical + LLM confirmation for ambiguous cases
+        - WeightedHeadingEnricher: like statistical, but adds confidence score
+    """
+
+    @abstractmethod
+    async def enrich(self, chunks: list["Chunk"], document: "Document") -> list["Chunk"]:
+        """
+        Enrich a list of chunks using information from the source document.
+
+        Args:
+            chunks: List of Chunk objects produced by the chunker
+            document: The source Document (text + metadata)
+
+        Returns:
+            A new list of Chunk objects (do NOT mutate the input list or chunks)
+        """
+        pass
+
+
+class NoOpEnricher(ChunkEnricher):
+    """
+    Identity enricher that returns chunks unchanged.
+
+    Used as:
+    - Default enricher (no annotation overhead)
+    - Baseline for comparison runs (--enricher none)
+
+    Example:
+        >>> enricher = NoOpEnricher()
+        >>> result = await enricher.enrich(chunks, document)
+        >>> result is chunks
+        True
+    """
+
+    async def enrich(self, chunks: list["Chunk"], document: "Document") -> list["Chunk"]:
+        """Return the chunk list unchanged."""
+        return chunks
 
 
 class DocumentLoader(ABC):

@@ -30,13 +30,20 @@ from typing import Any, Callable, Optional
 
 from dragonwizard.config.logging import get_logger
 from dragonwizard.config.settings import RAGSettings
-from dragonwizard.rag.base import Chunk, Document
+from dragonwizard.rag.base import Chunk, ChunkEnricher, Document
 from dragonwizard.rag.chunking import SentenceAwareChunker
 from dragonwizard.rag.embeddings import EmbeddingModel
-from dragonwizard.rag.loaders import MarkdownLoader, PDFLoader, TextLoader
+from dragonwizard.rag.sources.markdown.loader import MarkdownLoader
+from dragonwizard.rag.sources.pdf.loader import ExtractionMode, PDFLoader
+from dragonwizard.rag.sources.text.loader import TextLoader
 from dragonwizard.rag.vector_store import ChromaVectorStore
 
 logger = get_logger(__name__)
+
+# Parent directory names that map to known D&D editions.
+# Files in other directories (homebrew, supplements, web-scraped content)
+# receive edition=None and are not filtered by edition-scoped queries.
+_KNOWN_EDITIONS: frozenset[str] = frozenset({"5e", "5.5e"})
 
 
 class IngestionPipeline:
@@ -69,7 +76,9 @@ class IngestionPipeline:
         self,
         settings: RAGSettings,
         embedding_model: EmbeddingModel,
-        vector_store: ChromaVectorStore
+        vector_store: ChromaVectorStore,
+        enrichers: list[ChunkEnricher] | None = None,
+        extraction_mode: ExtractionMode = ExtractionMode.DEFAULT,
     ):
         """
         Initialize the ingestion pipeline.
@@ -78,10 +87,13 @@ class IngestionPipeline:
             settings: RAG configuration settings
             embedding_model: Initialized embedding model
             vector_store: Initialized vector store
+            enrichers: Optional list of ChunkEnrichers applied after chunking
+            extraction_mode: How to read text from PDF pages (default/column_aware)
         """
         self.settings = settings
         self.embedding_model = embedding_model
         self.vector_store = vector_store
+        self._enrichers = enrichers or []
 
         # Initialize chunker with settings
         self._chunker = SentenceAwareChunker(
@@ -90,12 +102,12 @@ class IngestionPipeline:
             encoding_name="cl100k_base"
         )
 
-        # Register document loaders
+        # Register document loaders (PDFLoader respects extraction_mode)
         self._loaders = {
             ".txt": TextLoader(),
             ".md": MarkdownLoader(),
             ".markdown": MarkdownLoader(),
-            ".pdf": PDFLoader(ocr_enabled=settings.ocr_enabled)
+            ".pdf": PDFLoader(ocr_enabled=settings.ocr_enabled, extraction_mode=extraction_mode)
         }
 
         # Ensure processed data directory exists
@@ -153,9 +165,12 @@ class IngestionPipeline:
         try:
             # Step 1: Load document
             document = await self._load_document(file_path)
+            # Annotate with edition after loading; loaders don't know about
+            # directory layout, so this is the pipeline's responsibility.
+            document.metadata.edition = self._infer_edition(file_path)
             logger.info(
                 f"Loaded document: {document.metadata.title} "
-                f"({len(document.text)} characters)"
+                f"({len(document.text)} characters, edition={document.metadata.edition})"
             )
             if progress_callback:
                 progress_callback(f"Loaded: {document.metadata.title}")
@@ -166,6 +181,12 @@ class IngestionPipeline:
             logger.info(f"Created {len(chunks)} chunks")
             if progress_callback:
                 progress_callback(f"Chunked: {len(chunks)} pieces")
+
+            # Step 2b: Apply enrichers (heading injection, etc.)
+            for enricher in self._enrichers:
+                chunks = await enricher.enrich(chunks, document)
+            if self._enrichers:
+                logger.info(f"Enriched to {len(chunks)} chunks")
 
             # Step 3: Generate embeddings in batches
             chunk_texts = [chunk.text for chunk in chunks]
@@ -209,6 +230,7 @@ class IngestionPipeline:
         self,
         directory_path: Path,
         recursive: bool = False,
+        force: bool = False,
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> dict[str, int]:
         """
@@ -267,6 +289,7 @@ class IngestionPipeline:
 
                 chunk_count = await self.ingest_file(
                     file_path,
+                    force=force,
                     progress_callback=progress_callback
                 )
                 results[str(file_path)] = chunk_count
@@ -360,6 +383,7 @@ class IngestionPipeline:
             "source_file": document.metadata.source_file,
             "source_type": document.metadata.source_type,
             "title": document.metadata.title,
+            "edition": document.metadata.edition,
             "page_number": None  # Will be overridden for PDFs
         }
 
@@ -402,6 +426,21 @@ class IngestionPipeline:
             metadatas=metadatas,
             embeddings=embeddings
         )
+
+    def _infer_edition(self, file_path: Path) -> str | None:
+        """
+        Infer D&D edition from the file's parent directory name.
+
+        Relies on the established directory convention:
+            data/raw/pdf/5e/   → "5e"   (2014 rules)
+            data/raw/pdf/5.5e/ → "5.5e" (2024 rules)
+
+        Returns None for paths that don't match a known edition directory,
+        leaving those documents unfiltered by edition-scoped queries
+        (e.g. homebrew content, web-scraped SRD, forum Q&A).
+        """
+        parent = file_path.parent.name
+        return parent if parent in _KNOWN_EDITIONS else None
 
     def _compute_file_hash(self, file_path: Path) -> str:
         """

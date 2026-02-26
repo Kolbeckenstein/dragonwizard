@@ -503,6 +503,7 @@ A living list of potential improvements, collected during development. Not prior
 | **5e SRD web scraper** | Scrape the 5e SRD (5e.tools or official WotC page) into structured documents. Implement as `SRDWebLoader(DocumentLoader)` with configurable base URL so alternative SRD mirrors can be swapped in. | Medium | High |
 | **D&D Beyond forum scraper** | Scrape D&D Beyond rules Q&A forum threads. Implement as `ForumLoader(DocumentLoader)` producing paired `{question, answer}` documents. Architecture: paginated thread list → thread detail → extract accepted/top-voted answer pairs. | High | High |
 | **Paired Q&A embeddings** | For forum Q&A pairs, embed the *question* text for retrieval matching (closer to how users phrase queries) while storing the full Q+A as context. Requires a new `ForumChunk` type with `question_embedding` and `answer_text` fields in the vector store schema. | Medium | High |
+| **Edition-level config filter** | Add `default_edition_filter: str | None` to `RAGSettings`. When set, all searches implicitly add `filters={"edition": value}` — useful for single-edition bot deployments. Future: per-Discord-server override via bot config. | Low | Medium |
 | **Automatic errata ingestion** | Monitor official errata sources and update vector store automatically. | Medium | Medium |
 | **Homebrew content support** | Allow server admins to upload custom rules with proper namespacing. | High | Medium |
 | **Source attribution UI** | Rich embeds showing exact page numbers, book covers, hyperlinks to D&D Beyond. | Low | Medium |

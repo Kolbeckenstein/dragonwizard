@@ -21,6 +21,7 @@ Graceful Degradation:
 """
 
 import subprocess
+from enum import Enum
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -33,6 +34,25 @@ logger = get_logger(__name__)
 # Pages with fewer extracted characters than this AND containing images
 # are treated as scanned and routed through OCR.
 _OCR_TEXT_THRESHOLD = 50
+
+
+class ExtractionMode(Enum):
+    """
+    Controls how PDFLoader reads text from each page.
+
+    DEFAULT:
+        Calls ``page.get_text()`` — PyMuPDF's standard extraction.
+        Fast and sufficient for single-column layouts, but may interleave
+        left and right column text on multi-column pages.
+
+    COLUMN_AWARE:
+        Calls ``page.get_text("blocks")`` to get positioned text blocks,
+        then re-orders them so the left column is read entirely before the
+        right column. Prevents the interleaving problem common in D&D books
+        (monster manual stat blocks, spell lists) that use two-column layouts.
+    """
+    DEFAULT = "default"
+    COLUMN_AWARE = "column_aware"
 
 
 class PDFLoadError(Exception):
@@ -54,6 +74,8 @@ class PDFLoader(DocumentLoader):
         ocr_enabled: Attempt OCR on scanned pages (default: True).
                      Set False for faster processing or when Tesseract
                      isn't available and you want to suppress the probe.
+        extraction_mode: How to read text from each page (default: ExtractionMode.DEFAULT).
+                         Use ExtractionMode.COLUMN_AWARE for two-column PDFs.
 
     Example:
         >>> loader = PDFLoader()
@@ -64,8 +86,9 @@ class PDFLoader(DocumentLoader):
         text
     """
 
-    def __init__(self, *, ocr_enabled: bool = True):
+    def __init__(self, *, ocr_enabled: bool = True, extraction_mode: ExtractionMode = ExtractionMode.DEFAULT):
         self._ocr_enabled = ocr_enabled
+        self._extraction_mode = extraction_mode
         # Lazily populated on first OCR attempt; avoids subprocess calls when
         # every page has sufficient text.
         self._ocr_available: bool | None = None
@@ -118,6 +141,34 @@ class PDFLoader(DocumentLoader):
         textpage = page.get_textpage_ocr(dpi=300, full=True)
         return page.get_text(textpage=textpage)
 
+    def _extract_page_text_column_aware(self, page: fitz.Page) -> str:
+        """
+        Extract text from a page by sorting blocks into left and right columns.
+
+        Reads all text blocks with their bounding boxes, splits them at the page
+        midpoint, sorts each column by Y coordinate (top-to-bottom), then
+        concatenates left column first and right column second.
+
+        This corrects the interleaved reading order that PyMuPDF's default
+        full-width scan produces on two-column PDF layouts.
+
+        Args:
+            page: PyMuPDF page object
+
+        Returns:
+            Page text with left column preceding right column
+        """
+        blocks = page.get_text("blocks")
+        midpoint = page.rect.width / 2
+
+        # block_type 0 = text; skip image blocks (type 1)
+        text_blocks = [b for b in blocks if b[6] == 0]
+
+        left = sorted([b for b in text_blocks if b[0] < midpoint], key=lambda b: b[1])
+        right = sorted([b for b in text_blocks if b[0] >= midpoint], key=lambda b: b[1])
+
+        return "\n".join(b[4] for b in left + right)
+
     def supports_format(self, file_path: Path) -> bool:
         """Check if this loader can handle the file."""
         return file_path.suffix.lower() == ".pdf"
@@ -161,7 +212,12 @@ class PDFLoader(DocumentLoader):
             for page_num in range(len(pdf_doc)):
                 try:
                     page = pdf_doc[page_num]
-                    page_text = page.get_text()
+
+                    # Choose extraction strategy
+                    if self._extraction_mode == ExtractionMode.COLUMN_AWARE:
+                        page_text = self._extract_page_text_column_aware(page)
+                    else:
+                        page_text = page.get_text()
                     extraction_method = "text"
 
                     # OCR fallback: if text looks insufficient and page has images,

@@ -157,11 +157,14 @@ class SentenceAwareChunker:
         sentences = self._split_into_sentences(text)
         logger.debug(f"Split into {len(sentences)} sentences")
 
-        # Group sentences into chunks
-        chunks = []
-        current_chunk_sentences = []
+        # Group sentences into chunks, tracking char positions in the original text
+        chunks_with_pos: list[tuple[str, int, int]] = []  # (text, char_start, char_end)
+        current_chunk_sentences: list[str] = []
         current_chunk_tokens = 0
-        overlap_sentences = []  # Sentences to carry over for overlap
+        overlap_sentences: list[str] = []
+        # running_pos: lower bound for text.find() searches; prevents matching
+        # sentences that appeared earlier in the document
+        running_pos = 0
 
         for sentence in sentences:
             sentence_tokens = self._count_tokens(sentence)
@@ -169,14 +172,26 @@ class SentenceAwareChunker:
             # Check if adding this sentence would exceed target
             if current_chunk_tokens + sentence_tokens > self.target_tokens and current_chunk_sentences:
                 # Finalize current chunk
-                chunk_text = " ".join(current_chunk_sentences)
-                chunks.append(chunk_text)
+                joined = " ".join(current_chunk_sentences)
+                first_sent = current_chunk_sentences[0]
+                found = text.find(first_sent, running_pos)
+                char_start = found if found != -1 else running_pos
+                char_end = char_start + len(joined)
+                chunks_with_pos.append((joined, char_start, char_end))
 
                 # Prepare overlap for next chunk
                 overlap_sentences = self._get_overlap_sentences(
                     current_chunk_sentences,
                     self.overlap_tokens
                 )
+
+                # Advance running_pos so that the next chunk's search starts
+                # from the beginning of the overlap region (not past it)
+                if overlap_sentences:
+                    overlap_start = text.find(overlap_sentences[0], char_start)
+                    running_pos = overlap_start if overlap_start != -1 else char_start
+                else:
+                    running_pos = char_end
 
                 # Start new chunk with overlap
                 current_chunk_sentences = overlap_sentences + [sentence]
@@ -188,14 +203,18 @@ class SentenceAwareChunker:
 
         # Add final chunk if any sentences remain
         if current_chunk_sentences:
-            chunk_text = " ".join(current_chunk_sentences)
-            chunks.append(chunk_text)
+            joined = " ".join(current_chunk_sentences)
+            first_sent = current_chunk_sentences[0]
+            found = text.find(first_sent, running_pos)
+            char_start = found if found != -1 else running_pos
+            char_end = char_start + len(joined)
+            chunks_with_pos.append((joined, char_start, char_end))
 
-        logger.debug(f"Created {len(chunks)} chunks")
+        logger.debug(f"Created {len(chunks_with_pos)} chunks")
 
         # Convert to Chunk objects with metadata
         return self._create_chunk_objects(
-            chunks=chunks,
+            chunks=chunks_with_pos,
             document_id=document_id,
             base_metadata=metadata
         )
@@ -252,7 +271,7 @@ class SentenceAwareChunker:
             >>> overlap = chunker._get_overlap_sentences(sentences, 5)
             >>> # Returns last sentence(s) totaling ~5 tokens
         """
-        if not sentences:
+        if not sentences or target_overlap_tokens == 0:
             return []
 
         overlap_sentences = []
@@ -273,15 +292,15 @@ class SentenceAwareChunker:
 
     def _create_chunk_objects(
         self,
-        chunks: list[str],
+        chunks: list[tuple[str, int, int]],
         document_id: str,
         base_metadata: dict[str, Any]
     ) -> list[Chunk]:
         """
-        Convert chunk texts to Chunk objects with metadata.
+        Convert chunk tuples to Chunk objects with metadata.
 
         Args:
-            chunks: List of chunk text strings
+            chunks: List of (text, char_start, char_end) tuples
             document_id: Parent document UUID
             base_metadata: Base metadata to include in all chunks
 
@@ -290,10 +309,11 @@ class SentenceAwareChunker:
 
         Note:
             Embeddings are not generated here - that happens in the pipeline.
+            char_start / char_end come from the tuples, not base_metadata.
         """
         chunk_objects = []
 
-        for i, chunk_text in enumerate(chunks):
+        for i, (chunk_text, char_start, char_end) in enumerate(chunks):
             # Generate unique chunk ID
             chunk_id = str(uuid.uuid4())
 
@@ -312,8 +332,9 @@ class SentenceAwareChunker:
                 token_count=token_count,
                 page_number=base_metadata.get("page_number"),
                 section=base_metadata.get("section"),
-                char_start=base_metadata.get("char_start"),
-                char_end=base_metadata.get("char_end")
+                char_start=char_start,
+                char_end=char_end,
+                edition=base_metadata.get("edition"),
             )
 
             # Create chunk (no embedding yet)

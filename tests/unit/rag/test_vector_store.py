@@ -422,6 +422,63 @@ class TestVectorStoreCitations:
         assert "Campaign Guide" in citation
         assert "§Character Creation" in citation
 
+    @pytest.mark.asyncio
+    async def test_format_citation_includes_edition_when_set(self, tmp_path):
+        """Edition tag should appear in citation so LLM and users know which ruleset.
+
+        Format: "[Title (edition), p.N, chunk X/Y]"
+        This helps the LLM avoid mixing 5e and 5.5e rules in a single answer,
+        and lets users verify which edition a cited passage comes from.
+        """
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="data/raw/pdf/5e/phb.pdf",
+            source_type="pdf",
+            title="Player's Handbook",
+            chunk_index=2,
+            total_chunks=15,
+            token_count=100,
+            page_number=42,
+            edition="5e",
+        )
+
+        citation = store._format_citation(metadata)
+
+        assert "Player's Handbook (5e)" in citation
+        assert "p.42" in citation
+
+    @pytest.mark.asyncio
+    async def test_format_citation_omits_edition_tag_when_none(self, tmp_path):
+        """When edition is None, citation should not contain '(None)' or any edition tag.
+
+        Documents without an edition (homebrew, SRD, forum content) should still
+        produce clean citations — absence of edition is silently invisible.
+        """
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="homebrew.txt",
+            source_type="txt",
+            title="House Rules",
+            chunk_index=0,
+            total_chunks=3,
+            token_count=80,
+            edition=None,
+        )
+
+        citation = store._format_citation(metadata)
+
+        assert "House Rules" in citation
+        assert "(None)" not in citation
+        assert "()" not in citation
+        # Title should appear without any parenthetical suffix
+        assert "House Rules (" not in citation
+
 
 class TestVectorStoreManagement:
     """Test collection management operations."""

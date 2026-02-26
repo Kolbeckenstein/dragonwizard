@@ -478,3 +478,237 @@ class TestComponentIntegration:
         assert all(str(test_file) in meta['source_file'] for meta in metadatas)
         assert all(meta['source_type'] == 'txt' for meta in metadatas)
         assert all(meta['title'] == 'test_doc' for meta in metadatas)
+
+
+class TestEditionInference:
+    """
+    Tests for edition metadata inference from directory structure.
+
+    Edition is derived at ingestion time from the parent directory name,
+    relying on the established convention:
+        data/raw/pdf/5e/     → "5e"   (2014 rules)
+        data/raw/pdf/5.5e/   → "5.5e" (2024 rules)
+
+    This approach keeps edition metadata in one place (the filesystem
+    layout the user already maintains) rather than requiring per-file
+    tagging. Documents outside a known edition directory get edition=None,
+    leaving them unfiltered by edition-scoped queries.
+    """
+
+    def _make_pipeline(self):
+        settings = RAGSettings()
+        embedding_model = MagicMock()
+        vector_store = MagicMock()
+        return IngestionPipeline(settings, embedding_model, vector_store)
+
+    def test_infer_edition_returns_5e_for_5e_directory(self, tmp_path):
+        """Files inside a '5e' directory should be tagged as edition '5e'."""
+        pipeline = self._make_pipeline()
+        file_path = tmp_path / "5e" / "phb.pdf"
+        assert pipeline._infer_edition(file_path) == "5e"
+
+    def test_infer_edition_returns_5_5e_for_5_5e_directory(self, tmp_path):
+        """Files inside a '5.5e' directory should be tagged as edition '5.5e'."""
+        pipeline = self._make_pipeline()
+        file_path = tmp_path / "5.5e" / "phb2024.pdf"
+        assert pipeline._infer_edition(file_path) == "5.5e"
+
+    def test_infer_edition_returns_none_for_unknown_directory(self, tmp_path):
+        """Files in an unrecognised directory (e.g. 'supplements') return None.
+
+        This preserves future flexibility — homebrew, web-scraped content, and
+        other sources can live alongside edition-tagged PDFs without being
+        mislabelled.
+        """
+        pipeline = self._make_pipeline()
+        file_path = tmp_path / "supplements" / "ua.pdf"
+        assert pipeline._infer_edition(file_path) is None
+
+    def test_infer_edition_returns_none_for_root_path(self, tmp_path):
+        """Files directly in the pdf root (no edition sub-dir) return None."""
+        pipeline = self._make_pipeline()
+        file_path = tmp_path / "rules.pdf"
+        assert pipeline._infer_edition(file_path) is None
+
+    @pytest.mark.asyncio
+    async def test_ingest_propagates_edition_through_to_vector_store(self, tmp_path):
+        """Edition inferred from directory should appear in chunk metadata stored in ChromaDB.
+
+        This is the end-to-end check: file in '5e/' → edition='5e' in every chunk
+        that lands in the vector store. ChromaDB can then filter on this field.
+        """
+        settings = RAGSettings()
+        embedding_model = MagicMock()
+        embedding_model.embed = AsyncMock(return_value=np.random.rand(1, 384))
+        vector_store = MagicMock()
+        vector_store.add = AsyncMock()
+
+        pipeline = IngestionPipeline(settings, embedding_model, vector_store)
+
+        # Create file inside a "5e" sub-directory — simulates data/raw/pdf/5e/
+        edition_dir = tmp_path / "5e"
+        edition_dir.mkdir()
+        test_file = edition_dir / "rules.txt"
+        test_file.write_text("Fireball deals 8d6 fire damage in a 20-foot radius.")
+
+        await pipeline.ingest_file(test_file)
+
+        call_args = vector_store.add.call_args
+        metadatas = call_args.kwargs['metadatas']
+        assert all(meta['edition'] == '5e' for meta in metadatas)
+
+    @pytest.mark.asyncio
+    async def test_ingest_edition_is_none_for_non_edition_directory(self, tmp_path):
+        """Files outside an edition directory should not have edition in metadata.
+
+        None values are filtered by to_chromadb_dict(), so 'edition' should be
+        absent from the stored metadata dict rather than stored as None.
+        """
+        settings = RAGSettings()
+        embedding_model = MagicMock()
+        embedding_model.embed = AsyncMock(return_value=np.random.rand(1, 384))
+        vector_store = MagicMock()
+        vector_store.add = AsyncMock()
+
+        pipeline = IngestionPipeline(settings, embedding_model, vector_store)
+
+        test_file = tmp_path / "rules.txt"
+        test_file.write_text("Some content about D&D rules goes here.")
+
+        await pipeline.ingest_file(test_file)
+
+        call_args = vector_store.add.call_args
+        metadatas = call_args.kwargs['metadatas']
+        # None is filtered from the ChromaDB dict — key absent, not stored as None
+        assert all('edition' not in meta for meta in metadatas)
+
+
+class TestPipelineWithEnrichers:
+    """
+    Tests that IngestionPipeline applies ChunkEnrichers after chunking
+    and threads ExtractionMode through to PDFLoader.
+    """
+
+    def _make_pipeline(self, tmp_path, enrichers=None, extraction_mode=None):
+        """Build a pipeline with mocked embedding model and vector store."""
+        from dragonwizard.rag.sources.pdf.loader import ExtractionMode as EM
+        settings = RAGSettings()
+        embedding_model = MagicMock()
+        embedding_model.embed = AsyncMock(return_value=MagicMock(
+            shape=(1, 384),
+            tolist=lambda: [[0.1] * 384],
+            __iter__=lambda self: iter([[0.1] * 384]),
+        ))
+        # numpy-like: embed returns a 2d array where each row is an embedding
+        import numpy as np
+        embedding_model.embed = AsyncMock(return_value=np.zeros((5, 384)))
+
+        vector_store = MagicMock()
+        vector_store.add = AsyncMock()
+
+        kwargs = {}
+        if enrichers is not None:
+            kwargs["enrichers"] = enrichers
+        if extraction_mode is not None:
+            kwargs["extraction_mode"] = extraction_mode
+
+        pipeline = IngestionPipeline(settings, embedding_model, vector_store, **kwargs)
+        return pipeline, embedding_model, vector_store
+
+    def test_pipeline_accepts_enrichers_kwarg(self, tmp_path):
+        """IngestionPipeline should accept an enrichers list without error."""
+        from dragonwizard.rag.base import NoOpEnricher
+        pipeline, _, _ = self._make_pipeline(tmp_path, enrichers=[NoOpEnricher()])
+        assert len(pipeline._enrichers) == 1
+
+    def test_pipeline_default_enrichers_is_empty(self, tmp_path):
+        """Default pipeline should have no enrichers."""
+        pipeline, _, _ = self._make_pipeline(tmp_path)
+        assert pipeline._enrichers == []
+
+    def test_pipeline_accepts_extraction_mode(self, tmp_path):
+        """IngestionPipeline should accept extraction_mode and pass it to PDFLoader."""
+        from dragonwizard.rag.sources.pdf.loader import ExtractionMode
+        pipeline, _, _ = self._make_pipeline(tmp_path, extraction_mode=ExtractionMode.COLUMN_AWARE)
+        # PDFLoader should be configured with COLUMN_AWARE mode
+        pdf_loader = pipeline._loaders[".pdf"]
+        assert pdf_loader._extraction_mode == ExtractionMode.COLUMN_AWARE
+
+    @pytest.mark.asyncio
+    async def test_enricher_is_called_after_chunking(self, tmp_path):
+        """Enricher.enrich() should be called once with the chunks and document."""
+        from dragonwizard.rag.base import ChunkEnricher
+
+        call_log = []
+
+        class SpyEnricher(ChunkEnricher):
+            async def enrich(self, chunks, document):
+                call_log.append(("enrich", len(chunks)))
+                return chunks
+
+        pipeline, _, _ = self._make_pipeline(tmp_path, enrichers=[SpyEnricher()])
+
+        test_file = tmp_path / "rules.txt"
+        test_file.write_text("Some content about D&D rules goes here for testing enricher.")
+
+        await pipeline.ingest_file(test_file)
+
+        assert len(call_log) == 1
+        assert call_log[0][0] == "enrich"
+
+    @pytest.mark.asyncio
+    async def test_multiple_enrichers_applied_in_order(self, tmp_path):
+        """Multiple enrichers should be applied sequentially."""
+        from dragonwizard.rag.base import ChunkEnricher
+
+        order: list[str] = []
+
+        class FirstEnricher(ChunkEnricher):
+            async def enrich(self, chunks, document):
+                order.append("first")
+                return chunks
+
+        class SecondEnricher(ChunkEnricher):
+            async def enrich(self, chunks, document):
+                order.append("second")
+                return chunks
+
+        pipeline, _, _ = self._make_pipeline(
+            tmp_path,
+            enrichers=[FirstEnricher(), SecondEnricher()]
+        )
+
+        test_file = tmp_path / "rules.txt"
+        test_file.write_text("Content for testing multiple enrichers in sequence.")
+
+        await pipeline.ingest_file(test_file)
+
+        assert order == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_enricher_output_used_for_embedding(self, tmp_path):
+        """The chunks returned by the enricher should be the ones embedded."""
+        from dragonwizard.rag.base import Chunk, ChunkEnricher
+
+        embedded_texts: list[str] = []
+
+        class PrefixEnricher(ChunkEnricher):
+            async def enrich(self, chunks, document):
+                return [chunk.model_copy(update={"text": "PREFIX " + chunk.text}) for chunk in chunks]
+
+        pipeline, embedding_model, _ = self._make_pipeline(tmp_path, enrichers=[PrefixEnricher()])
+
+        # Capture what texts are passed to embed()
+        original_embed = embedding_model.embed
+        async def capturing_embed(texts):
+            embedded_texts.extend(texts)
+            import numpy as np
+            return np.zeros((len(texts), 384))
+        embedding_model.embed = capturing_embed
+
+        test_file = tmp_path / "rules.txt"
+        test_file.write_text("A sentence about D&D rules.")
+
+        await pipeline.ingest_file(test_file)
+
+        assert all(t.startswith("PREFIX ") for t in embedded_texts)

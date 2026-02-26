@@ -79,7 +79,7 @@ After the container starts, configure your `.env` file:
 LLM__API_KEY=your-anthropic-key-here
 
 # Required for Discord bot (Phase 5+)
-DISCORD_TOKEN=your-discord-bot-token-here
+BOT__TOKEN=your-discord-bot-token-here
 
 # Dice server path (auto-configured)
 DICE_SERVER_PATH=./external/dice-rolling-mcp/dist/index.js

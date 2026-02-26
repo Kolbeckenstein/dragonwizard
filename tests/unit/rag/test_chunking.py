@@ -331,7 +331,8 @@ class TestChunkMetadataGeneration:
         """Should create Chunk objects with ChunkMetadata."""
         chunker = SentenceAwareChunker()
 
-        chunks = ["Chunk one text.", "Chunk two text."]
+        # _create_chunk_objects now accepts (text, char_start, char_end) tuples
+        chunks = [("Chunk one text.", 0, 15), ("Chunk two text.", 16, 31)]
         document_id = "doc-abc"
         base_metadata = {
             "source_file": "test.txt",
@@ -366,15 +367,14 @@ class TestChunkMetadataGeneration:
         """Should include optional metadata fields if provided."""
         chunker = SentenceAwareChunker()
 
-        chunks = ["Chunk text."]
+        # char_start/char_end now come from the tuple, not base_metadata
+        chunks = [("Chunk text.", 0, 100)]
         base_metadata = {
             "source_file": "srd.pdf",
             "source_type": "pdf",
             "title": "SRD",
             "page_number": 42,
             "section": "Spells",
-            "char_start": 0,
-            "char_end": 100
         }
 
         chunk_objects = chunker._create_chunk_objects(
@@ -388,3 +388,148 @@ class TestChunkMetadataGeneration:
         assert metadata.section == "Spells"
         assert metadata.char_start == 0
         assert metadata.char_end == 100
+
+
+class TestCharStartTracking:
+    """
+    Tests that char_start and char_end are correctly populated in chunk metadata.
+
+    Heading injection (ChunkEnricher) needs accurate character offsets into
+    document.text to find the nearest preceding heading for each chunk.
+    Previously, _create_chunk_objects() read char_start from base_metadata
+    where it was always None.
+    """
+
+    def test_first_chunk_char_start_is_zero(self):
+        """The first chunk should always start at character offset 0."""
+        chunker = SentenceAwareChunker(target_tokens=100, overlap_tokens=0)
+        text = "Fireball is a 3rd-level spell. It deals 8d6 fire damage."
+
+        chunks = chunker.chunk_text(
+            text=text,
+            document_id="doc-123",
+            metadata={"source_file": "test.txt", "source_type": "txt", "title": "Test"}
+        )
+
+        assert chunks[0].metadata.char_start == 0
+
+    def test_char_start_populates_in_chunk_metadata(self):
+        """char_start and char_end should be non-None integers on every chunk."""
+        chunker = SentenceAwareChunker(target_tokens=100, overlap_tokens=0)
+        text = "Fireball is a 3rd-level evocation spell. It deals 8d6 fire damage."
+
+        chunks = chunker.chunk_text(
+            text=text,
+            document_id="doc-123",
+            metadata={"source_file": "test.txt", "source_type": "txt", "title": "Test"}
+        )
+
+        for chunk in chunks:
+            assert chunk.metadata.char_start is not None
+            assert chunk.metadata.char_end is not None
+            assert isinstance(chunk.metadata.char_start, int)
+            assert isinstance(chunk.metadata.char_end, int)
+
+    def test_char_end_equals_char_start_plus_chunk_text_len(self):
+        """char_end should equal char_start + len(chunk.text) for all chunks."""
+        chunker = SentenceAwareChunker(target_tokens=100, overlap_tokens=0)
+        text = "Fireball is a 3rd-level spell. It deals 8d6 fire damage in a wide radius."
+
+        chunks = chunker.chunk_text(
+            text=text,
+            document_id="doc-123",
+            metadata={"source_file": "test.txt", "source_type": "txt", "title": "Test"}
+        )
+
+        for chunk in chunks:
+            assert chunk.metadata.char_end == chunk.metadata.char_start + len(chunk.text)
+
+    def test_char_start_increases_across_chunks_without_overlap(self):
+        """With overlap=0, each chunk's char_start should be strictly greater than the previous."""
+        chunker = SentenceAwareChunker(target_tokens=15, overlap_tokens=0)
+        text = (
+            "Fireball is a 3rd-level evocation spell. "
+            "It deals 8d6 fire damage. "
+            "It spreads around corners. "
+            "It ignites flammable objects in the area."
+        )
+
+        chunks = chunker.chunk_text(
+            text=text,
+            document_id="doc-123",
+            metadata={"source_file": "test.txt", "source_type": "txt", "title": "Test"}
+        )
+
+        assert len(chunks) > 1
+        for i in range(1, len(chunks)):
+            assert chunks[i].metadata.char_start > chunks[i - 1].metadata.char_start
+
+    def test_chunk_text_locatable_at_char_start_in_original(self):
+        """chunk.text should start at or near char_start in the original document text."""
+        chunker = SentenceAwareChunker(target_tokens=15, overlap_tokens=0)
+        # Use single-space separated sentences so joined text matches original
+        text = "First sentence here. Second sentence here. Third sentence here. Fourth sentence here."
+
+        chunks = chunker.chunk_text(
+            text=text,
+            document_id="doc-123",
+            metadata={"source_file": "test.txt", "source_type": "txt", "title": "Test"}
+        )
+
+        assert len(chunks) > 1
+        for chunk in chunks:
+            # The chunk text should be findable in the original near char_start
+            pos = text.find(chunk.text)
+            assert pos != -1, f"Chunk text not found in original: {chunk.text!r}"
+            # char_start should be within a small tolerance of the actual position
+            assert abs(chunk.metadata.char_start - pos) <= 2
+
+
+class TestChunkEditionMetadata:
+    """
+    Tests that edition propagates from base_metadata through to ChunkMetadata.
+
+    The pipeline infers edition from the source file's directory and passes
+    it in the base_metadata dict. The chunker must thread it through to each
+    ChunkMetadata so it ends up stored in ChromaDB for filtering.
+    """
+
+    def test_edition_propagates_from_base_metadata_to_chunks(self):
+        """Edition in base_metadata should appear on every chunk's metadata."""
+        chunker = SentenceAwareChunker(target_tokens=100, overlap_tokens=10)
+
+        chunks = chunker.chunk_text(
+            text="Fireball is a powerful evocation spell.",
+            document_id="doc-123",
+            metadata={
+                "source_file": "phb.pdf",
+                "source_type": "pdf",
+                "title": "Player's Handbook",
+                "edition": "5e",
+            }
+        )
+
+        assert len(chunks) >= 1
+        assert all(c.metadata.edition == "5e" for c in chunks)
+
+    def test_missing_edition_in_base_metadata_yields_none_on_chunks(self):
+        """When base_metadata has no 'edition' key, chunks should have edition=None.
+
+        This covers documents that aren't organised into an edition directory
+        (homebrew, web-scraped SRD, forum content, etc.).
+        """
+        chunker = SentenceAwareChunker(target_tokens=100, overlap_tokens=10)
+
+        chunks = chunker.chunk_text(
+            text="Some homebrew content about custom rules.",
+            document_id="doc-456",
+            metadata={
+                "source_file": "homebrew.txt",
+                "source_type": "txt",
+                "title": "Homebrew Rules",
+                # no "edition" key
+            }
+        )
+
+        assert len(chunks) >= 1
+        assert all(c.metadata.edition is None for c in chunks)

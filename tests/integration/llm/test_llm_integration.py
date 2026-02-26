@@ -86,8 +86,7 @@ def _make_tool_call_response(tool_name: str, arguments: dict, tool_call_id: str 
 @pytest.fixture
 def llm_settings():
     return LLMSettings(
-        provider="anthropic",
-        model="claude-sonnet-4-5-20250929",
+        model="anthropic/claude-sonnet-4-5-20250929",
         max_tokens=1024,
         temperature=0.3,
         api_key="test-integration-key",

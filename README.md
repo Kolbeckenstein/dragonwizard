@@ -1,245 +1,276 @@
 # DragonWizard
 
-DragonWizard is an LLM-powered Discord bot that provides accurate D&D 5th Edition rules answers using RAG (Retrieval-Augmented Generation) with local embeddings and external tool integrations.
+A Discord bot that answers D&D 5th Edition rules questions using retrieval-augmented generation (RAG). Ask it anything from spell mechanics to grappling rules — it searches your ingested rulebooks and generates a cited answer via an LLM. It can also roll dice mid-answer.
 
 ## Features
 
-- **Accurate Rules Lookup**: Uses RAG to retrieve relevant D&D 5e SRD content
-- **LLM-Powered Answers**: Leverages Claude/GPT for natural, context-aware responses
-- **Local Embeddings**: Uses Sentence Transformers (no API key needed, runs on CPU)
-- **Tool Integration**: Can roll dice via MCP servers and demonstrate mechanics
-- **Extensible Architecture**: Designed for future character sheets and campaign context
-- **Privacy-First**: All embeddings generated locally, no data sent to third parties
+- **`/ask`** — slash command for rules questions; responds with cited sources
+- **`@DragonWizard <question>`** — mention the bot anywhere to ask a question
+- **`/roll`** — roll dice using standard notation (`2d6+3`, `4d6kh3`, `d20`)
+- **LLM tool use** — the bot can roll dice automatically while composing an answer
+- **Channel restriction** — optionally limit responses to specific channels
+- **Multiple collections** — ingest with different strategies and compare quality
 
-## Project Status
 
-🚧 **Currently in Phase 1.1 - Project Setup** ✅
+## Requirements
 
-See [implementation.md](implementation.md) for the full development roadmap.
-
-## System Requirements
-
-- **Python**: 3.13+
-- **RAM**: 4GB minimum (for local embedding model)
-- **CPU**: 4+ cores recommended
-- **Disk**: ~500MB (models + data)
-- **OS**: Linux, macOS, or Windows (WSL2)
-
-The all-MiniLM-L6-v2 embedding model runs efficiently on CPU - no GPU required!
-
-## Quick Start
-
-### Prerequisites
-
-**Option 1: Dev Container (Recommended)**
-- [Docker](https://www.docker.com/products/docker-desktop)
-- [VS Code](https://code.visualstudio.com/) with [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-
-**Option 2: Local Installation**
 - Python 3.13+
-- [uv](https://github.com/astral-sh/uv) package manager
-- Node.js 20+ and npm (for MCP dice server)
+- [uv](https://docs.astral.sh/uv/) (package manager)
+- Node.js (for the MCP dice server — optional)
+- tesseract-ocr (optional, for scanned PDF pages)
+- An Anthropic, OpenAI, or compatible LLM API key
+- A Discord bot token
 
-### Installation
 
-**Option 1: Dev Container (Easiest)**
+## Setup
 
-1. Install Docker and VS Code with Dev Containers extension
-2. Clone and open the repository:
+### 1. Clone and install
+
 ```bash
-git clone <repository-url>
+git clone <repo-url> dragonwizard
 cd dragonwizard
-code .
-```
-3. When prompted, click "Reopen in Container" (or press F1 → "Dev Containers: Reopen in Container")
-4. Wait for automatic setup (~5 minutes first time)
-5. Done! All dependencies are installed and configured.
-
-See [.devcontainer/README.md](.devcontainer/README.md) for details.
-
-**Option 2: Local Installation**
-
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd dragonwizard
+git submodule update --init    # pulls the dice-rolling-mcp submodule
+uv sync                        # installs Python dependencies
 ```
 
-2. Run complete setup:
+### 2. Configure
+
 ```bash
-make setup
-```
-
-Or install manually:
-```bash
-# Install Python dependencies
-uv sync
-
-# Build MCP dice server
-make install-dice-server
-
-# Set up environment
 cp .env.example .env
-# Edit .env and add your API keys
+# Edit .env — at minimum set BOT__TOKEN and LLM__API_KEY
 ```
 
-3. Verify installation:
+See [.env.example](.env.example) for all available settings with inline documentation.
+
+### 3. Ingest documents
+
+Place your PDF rulebooks in `data/raw/pdf/` then run:
+
 ```bash
-uv run dragonwizard --version
+uv run dragonwizard ingest
 ```
 
-### Configuration
+This uses column-aware PDF extraction by default (better for multi-column rulebook layouts).
 
-The bot is configured via environment variables. Copy `.env.example` to `.env` and configure:
+Options:
 
-**Required API Keys:**
-- `LLM__API_KEY`: Anthropic Claude API key ([Get one here](https://console.anthropic.com/))
-- `DISCORD_TOKEN`: Discord bot token ([Create bot here](https://discord.com/developers/applications))
-
-**No Embeddings API Key Needed!** We use local Sentence Transformers (all-MiniLM-L6-v2) which:
-- Runs on your CPU (no GPU required)
-- Downloads automatically on first use (~90MB)
-- Generates 384-dimensional embeddings
-- Zero cost, fully private
-
-**Configuration Options:**
-- `LLM__PROVIDER`: "anthropic" or "openai"
-- `LLM__MODEL`: Model to use (default: claude-3-5-sonnet-20241022)
-- `RAG__CHUNK_SIZE`: Document chunk size (default: 512 tokens)
-- `RAG__EMBEDDING_MODEL`: Sentence Transformers model (default: sentence-transformers/all-MiniLM-L6-v2)
-- `RAG__EMBEDDING_DEVICE`: "cpu" or "cuda" (default: cpu)
-- `LOG_LEVEL`: Logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-
-View current configuration:
 ```bash
-uv run dragonwizard config
+# Ingest a specific directory or file
+uv run dragonwizard ingest path/to/pdfs/
+
+# Add statistical heading detection (injects "[Section: ...]" prefixes into chunks)
+uv run dragonwizard ingest --enricher stat_headings
+
+# Ingest into a named collection (for A/B comparison)
+uv run dragonwizard ingest --enricher stat_headings --collection col_stat
+
+# Force re-process already-ingested files
+uv run dragonwizard ingest --force
 ```
 
-## Usage
+### 4. Discord developer portal setup
 
-### CLI Commands
+Do this once before running the bot for the first time.
+
+#### 4a. Create the application and get a token
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and click **New Application**
+2. Give it a name (e.g. DragonWizard), click **Create**
+3. In the left sidebar, click **Bot**
+4. Click **Reset Token** → copy the token → set it as `BOT__TOKEN` in your `.env`
+
+#### 4b. Enable the Message Content privileged intent
+
+Still on the **Bot** page, scroll to **Privileged Gateway Intents** and toggle on:
+
+- **Message Content Intent** ← required for `@DragonWizard <question>` mentions
+
+Click **Save Changes**.
+
+> Without this, the bot starts but cannot read message text, so @mention questions won't work.
+
+#### 4c. Generate an invite URL and add the bot to your server
+
+1. In the left sidebar, go to **OAuth2 → URL Generator**
+2. Under **Scopes**, check **both**:
+   - `bot`
+   - `applications.commands` ← required for `/ask` and `/roll` slash commands
+3. Under **Bot Permissions**, check:
+   - `Send Messages`
+   - `Read Message History`
+   - `Use Slash Commands`
+4. Copy the generated URL at the bottom and open it in your browser to invite the bot to your server
+
+> If you skip `applications.commands` the bot will start but slash commands will fail with a 403 error. You can re-run the invite URL at any time to update scopes without removing the bot.
+
+#### 4d. (Optional) Set your dev guild ID for instant slash command sync
+
+By default, slash commands are synced globally, which can take up to 1 hour to appear. During development, add your server's ID to `.env` for instant sync:
+
+```ini
+BOT__DEV_GUILD_ID=your-server-id-here
+```
+
+To find your server ID: in Discord, enable Developer Mode (Settings → Advanced → Developer Mode), then right-click your server icon → **Copy Server ID**.
+
+### 5. Run the bot
 
 ```bash
-# Show version
-uv run dragonwizard --version
-
-# Show current configuration
-uv run dragonwizard config
-
-# Run the Discord bot (not yet implemented)
 uv run dragonwizard run
 ```
 
-### Development
+On startup the bot loads the RAG engine, syncs slash commands, and logs in. You should see:
 
-Run tests:
+```
+INFO - RAG engine ready
+INFO - LLM orchestrator ready (model: anthropic/claude-sonnet-4-6)
+INFO - Cogs loaded
+INFO - Slash commands synced to dev guild ... (instant)
+INFO - Logged in as DragonWizard#1234 (id: ...)
+```
+
+
+## CLI Reference
+
+```
+dragonwizard [--env-file PATH] [--log-level LEVEL] <command>
+
+Commands:
+  run      Start the Discord bot
+  ingest   Ingest documents into the RAG vector store
+  query    Ask a question from the CLI (no Discord needed)
+  compare  Compare retrieval quality across multiple collections
+  config   Show current configuration
+```
+
+### `ingest`
+
+```
+dragonwizard ingest [SOURCE_PATH] [OPTIONS]
+
+  SOURCE_PATH               Directory or file to ingest (default: data/raw/pdf)
+  --extraction-mode         default | column_aware  (default: column_aware)
+  --enricher                none | stat_headings | llm_headings | weighted_headings
+  --collection NAME         Target ChromaDB collection (default: settings value)
+  --force                   Re-process already-ingested files
+  --clear-existing          Wipe collection before ingesting
+  --batch-size N            Override embedding batch size
+```
+
+### `query`
+
+```
+dragonwizard query QUESTION [OPTIONS]
+
+  --rag-only                Show retrieved chunks only, skip LLM
+  --k N                     Number of chunks to retrieve
+  --edition 5e|5.5e         Filter by edition
+  --collection NAME         Query a specific collection
+```
+
+### `compare`
+
+Compare retrieval quality across multiple ingestion strategies:
+
 ```bash
+uv run dragonwizard compare "Do orcs have darkvision?" \
+    --collections baseline,col_stat,col_llm --k 3
+```
+
+
+## Ingestion Strategies
+
+DragonWizard supports two independent quality dimensions you can combine:
+
+| Flag | Effect |
+|---|---|
+| `--extraction-mode default` | Standard PDF text extraction |
+| `--extraction-mode column_aware` | Left-column-first ordering for multi-column layouts |
+| `--enricher none` | No annotation |
+| `--enricher stat_headings` | Detects headings via font size; prepends `[Section: ...]` to chunks |
+| `--enricher weighted_headings` | Like `stat_headings` but includes a confidence score |
+| `--enricher llm_headings` | Uses an LLM to confirm ambiguous heading candidates |
+
+Recommended starting point for D&D rulebooks:
+
+```bash
+uv run dragonwizard ingest --enricher stat_headings
+```
+
+
+## Development
+
+```bash
+# Run tests
 uv run pytest
+
+# Run tests with coverage
+uv run pytest --cov=dragonwizard --cov-report=term-missing
+
+# Run a specific test file
+uv run pytest tests/unit/bot/ -v
+
+# Query without the bot (useful for iterating on RAG quality)
+uv run dragonwizard query "How does grappling work?" --rag-only
 ```
 
-Run tests with coverage:
-```bash
-uv run pytest --cov=dragonwizard
-```
-
-## Project Structure
+### Project Structure
 
 ```
 dragonwizard/
-├── dragonwizard/          # Main package
-│   ├── bot/              # Discord bot layer
-│   ├── rag/              # RAG engine (retrieval & vector store)
-│   ├── llm/              # LLM orchestration & tool calling
-│   ├── tools/            # External tool integrations (MCP, etc.)
-│   ├── config/           # Configuration & settings management
-│   └── __main__.py       # CLI entry point
-├── tests/                # Test suite
-│   ├── unit/            # Unit tests
-│   └── integration/     # Integration tests
-├── data/                # Data storage
-│   ├── raw/            # Source documents (SRD, etc.)
-│   └── processed/      # Processed chunks & embeddings
-├── pyproject.toml       # Project metadata & dependencies
-├── .env.example         # Example environment configuration
-└── implementation.md    # Development roadmap
+├── bot/
+│   ├── client.py          # DragonWizardBot (discord.py Bot subclass)
+│   └── cogs/
+│       ├── rules.py       # /ask command + @mention listener
+│       └── dice.py        # /roll command
+├── config/
+│   ├── settings.py        # Pydantic Settings (all config)
+│   └── logging.py         # Logging setup
+├── llm/
+│   ├── orchestrator.py    # LLM tool-use loop (LiteLLM)
+│   └── models.py          # LLMResponse, ToolCall, etc.
+├── rag/
+│   ├── pipeline.py        # Ingestion pipeline
+│   ├── engine.py          # Search + context formatting
+│   ├── chunking.py        # Sentence-aware chunker
+│   ├── embeddings.py      # Sentence Transformers wrapper
+│   ├── vector_store.py    # ChromaDB wrapper
+│   └── sources/
+│       ├── pdf/           # PDF loader + heading enrichers
+│       ├── text/          # Plain text loader
+│       └── markdown/      # Markdown loader
+├── tools/
+│   ├── base.py            # ToolAdapter ABC
+│   └── dice_roller.py     # MCP dice server client
+└── prompts/
+    └── system.txt         # LLM system prompt template
+
+data/
+├── raw/pdf/               # Put your PDF rulebooks here
+└── vector_db/             # ChromaDB storage (auto-created)
+
+external/
+└── dice-rolling-mcp/      # MCP dice server (git submodule)
 ```
 
-## Architecture
+### Environment Variables
 
-DragonWizard follows a layered architecture:
+All settings use double-underscore nesting: `SECTION__FIELD`.
 
-1. **Discord Bot Layer**: Message handling, command parsing, response formatting
-2. **Query Processing Layer**: Intent classification, query enrichment
-3. **RAG Engine Layer**: Document retrieval, vector search, semantic matching
-4. **LLM Orchestration Layer**: Prompt construction, tool calling, response generation
-5. **Tool Integration Layer**: External tools (dice rolling, spell lookup, etc.)
+| Variable | Default | Description |
+|---|---|---|
+| `BOT__TOKEN` | _(required)_ | Discord bot token |
+| `BOT__DEV_GUILD_ID` | _(unset)_ | Guild ID for instant slash command sync |
+| `BOT__ALLOWED_CHANNEL_IDS` | `[]` | Restrict responses to these channel IDs |
+| `LLM__API_KEY` | _(required)_ | API key for LLM provider |
+| `LLM__MODEL` | `anthropic/claude-sonnet-4-6` | LiteLLM model string |
+| `LLM__MAX_TOKENS` | `1024` | Max tokens in LLM response |
+| `LLM__TEMPERATURE` | `0.3` | LLM sampling temperature |
+| `RAG__COLLECTION_NAME` | `dragonwizard` | ChromaDB collection |
+| `RAG__DEFAULT_K` | `5` | Chunks retrieved per query |
+| `RAG__EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
+| `RAG__EMBEDDING_DEVICE` | `cpu` | `cpu` or `cuda` |
+| `RAG__OCR_ENABLED` | `true` | OCR fallback for scanned pages |
+| `TOOL_DICE_SERVER_PATH` | _(unset)_ | Path to `dice-rolling-mcp/dist/index.js` |
 
-**Key Technology Decisions:**
-- **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2) - local, free, private
-- **Vector DB**: ChromaDB - simple, local, SQLite-backed
-- **LLM**: Anthropic Claude - strong reasoning, long context, tool use
-- **Bot Framework**: discord.py - mature, async Python library
-
-See [architecture.md](architecture.md) for detailed architecture documentation.
-
-## Development Roadmap
-
-See [implementation.md](implementation.md) for the complete implementation plan.
-
-**Current Phase: 1.1 - Project Setup** ✅
-- [x] Initialize Python project with uv
-- [x] Create project structure
-- [x] Set up configuration management
-- [x] Set up logging framework
-- [x] Create CLI entry point
-- [x] Updated docs for local embeddings
-
-**Next Phase: 1.2 - MCP Dice Server Integration**
-- [ ] Install MCP Python SDK
-- [ ] Create tool adapter pattern
-- [ ] Implement dice rolling CLI
-
-**Future Phases:**
-- Phase 2: LLM API Integration & Tool Use
-- Phase 3: RAG Engine (Document Processing, Vector DB, Embeddings)
-- Phase 4: Query Processing Layer
-- Phase 5: Discord Bot Integration (MVP Complete!)
-- Phase 6: Enhancement & Polish
-- Phase 7: Extensibility (Character Sheets, Campaign Context)
-
-## Why Local Embeddings?
-
-We chose Sentence Transformers over cloud APIs for several reasons:
-
-| Factor | Sentence Transformers (Local) | OpenAI API |
-|--------|------------------------------|-----------|
-| **Cost** | Free | ~$0.0001 per 1K tokens |
-| **Privacy** | All data stays local | Sent to OpenAI |
-| **Setup** | ~90MB model download | API key only |
-| **Speed** | Depends on CPU (fast enough) | Consistent, fast |
-| **Requirements** | 2-4GB RAM | Internet connection |
-| **Offline** | Yes | No |
-
-For a D&D rules bot with ~1,000-2,000 document chunks, local embeddings are:
-- ✅ Fast enough (queries take milliseconds)
-- ✅ Zero ongoing cost
-- ✅ Fully private
-- ✅ Work offline
-- ✅ Simple to set up
-
-## Contributing
-
-This is currently a personal project. Contributions guidelines will be added in the future.
-
-## License
-
-TBD
-
-## Resources
-
-- [D&D 5e SRD](https://dnd.wizards.com/resources/systems-reference-document)
-- [Anthropic Claude API](https://docs.anthropic.com/)
-- [Model Context Protocol](https://modelcontextprotocol.io/)
-- [discord.py Documentation](https://discordpy.readthedocs.io/)
-- [Sentence Transformers](https://www.sbert.net/)
-- [ChromaDB Documentation](https://docs.trychroma.com/)
+See [.env.example](.env.example) for the full list with descriptions.

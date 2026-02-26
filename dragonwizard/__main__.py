@@ -13,6 +13,7 @@ from pathlib import Path
 from dragonwizard import __version__
 from dragonwizard.config.logging import get_logger, setup_logging
 from dragonwizard.config.settings import Settings, load_settings
+from dragonwizard.rag.components import RAGComponents
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -57,6 +58,38 @@ def create_parser() -> argparse.ArgumentParser:
         help="Show current configuration",
     )
 
+    # Query command
+    query_parser = subparsers.add_parser(
+        "query",
+        help="Ask a D&D rules question (RAG search + optional LLM response)",
+    )
+    query_parser.add_argument(
+        "question",
+        help='Question to ask, e.g. "How does advantage work?"',
+    )
+    query_parser.add_argument(
+        "--edition",
+        choices=["5e", "5.5e"],
+        default=None,
+        help="Filter results to a specific D&D edition (default: both editions)",
+    )
+    query_parser.add_argument(
+        "--rag-only",
+        action="store_true",
+        help="Show retrieved chunks only — skip LLM, no API key needed",
+    )
+    query_parser.add_argument(
+        "--k",
+        type=int,
+        default=None,
+        help="Number of chunks to retrieve (default: RAG__DEFAULT_K from config)",
+    )
+    query_parser.add_argument(
+        "--collection",
+        default=None,
+        help="Query a specific named ChromaDB collection (default: settings collection)",
+    )
+
     # Ingest command
     ingest_parser = subparsers.add_parser(
         "ingest",
@@ -64,13 +97,16 @@ def create_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument(
         "source_path",
+        nargs="?",
         type=Path,
-        help="Path to file or directory to ingest",
+        default=Path("data/raw/pdf"),
+        help="Path to file or directory to ingest (default: data/raw/pdf)",
     )
     ingest_parser.add_argument(
         "--recursive",
         action="store_true",
-        help="Process directories recursively",
+        default=True,
+        help="Process directories recursively (default: True)",
     )
     ingest_parser.add_argument(
         "--clear-existing",
@@ -88,8 +124,84 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override embedding batch size from config",
     )
+    ingest_parser.add_argument(
+        "--extraction-mode",
+        choices=["default", "column_aware"],
+        default="column_aware",
+        help="PDF text extraction: 'default' or 'column_aware' (left-column-first). "
+             "Default: column_aware",
+    )
+    ingest_parser.add_argument(
+        "--enricher",
+        choices=["none", "stat_headings", "llm_headings", "weighted_headings"],
+        default="none",
+        help="Chunk enricher: 'none', 'stat_headings', 'llm_headings', "
+             "or 'weighted_headings'. Default: none",
+    )
+    ingest_parser.add_argument(
+        "--collection",
+        default=None,
+        help="Override the target ChromaDB collection name "
+             "(default: settings collection).",
+    )
+
+    # Compare command
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="Compare retrieval quality across multiple named collections",
+    )
+    compare_parser.add_argument(
+        "question",
+        help="Question to search for across all collections",
+    )
+    compare_parser.add_argument(
+        "--collections",
+        required=True,
+        help="Comma-separated collection names, e.g. baseline,col_stat,col_llm",
+    )
+    compare_parser.add_argument(
+        "--k",
+        type=int,
+        default=3,
+        help="Chunks to retrieve per collection (default: 3)",
+    )
+    compare_parser.add_argument(
+        "--edition",
+        choices=["5e", "5.5e"],
+        default=None,
+        help="Filter results to a specific D&D edition (default: no filter)",
+    )
 
     return parser
+
+
+def _build_enricher(name: str, settings):
+    """
+    Map CLI enricher name to a ChunkEnricher instance.
+
+    Args:
+        name: One of 'none', 'stat_headings', 'llm_headings', 'weighted_headings'
+        settings: Full Settings object (for LLM config when needed)
+
+    Returns:
+        ChunkEnricher instance, or None for 'none'
+    """
+    from dragonwizard.rag.sources.pdf import (
+        StatisticalHeadingEnricher,
+        LLMHeadingEnricher,
+        WeightedHeadingEnricher,
+    )
+
+    if name == "none":
+        return None
+    elif name == "stat_headings":
+        return StatisticalHeadingEnricher()
+    elif name == "llm_headings":
+        return LLMHeadingEnricher(llm_settings=settings.llm)
+    elif name == "weighted_headings":
+        return WeightedHeadingEnricher()
+    else:
+        raise ValueError(f"Unknown enricher: {name!r}")
 
 
 def cmd_config(settings) -> int:
@@ -103,8 +215,7 @@ def cmd_config(settings) -> int:
     logger.info(f"Log File: {settings.log_file or 'None (console only)'}")
     logger.info(f"\nBot Name: {settings.bot.name}")
     logger.info(f"Command Prefix: {settings.bot.command_prefix}")
-    logger.info(f"\nLLM Provider: {settings.llm.provider}")
-    logger.info(f"LLM Model: {settings.llm.model}")
+    logger.info(f"\nLLM Model: {settings.llm.model}")
     logger.info(f"LLM API Key: {'Set' if settings.llm.api_key else 'Not set'}")
     logger.info(f"\nRAG Vector DB: {settings.rag.vector_db}")
     logger.info(f"RAG Chunk Size: {settings.rag.chunk_size}")
@@ -122,12 +233,28 @@ def cmd_config(settings) -> int:
 
 
 def cmd_run(settings) -> int:
-    """Run the Discord bot (placeholder)."""
+    """Start the Discord bot."""
     logger = get_logger(__name__)
-    logger.info("Starting DragonWizard bot...")
-    logger.warning("Discord bot functionality not yet implemented (Phase 5)")
-    logger.info("See implementation.md for development roadmap")
-    return 1
+
+    if not settings.bot.token:
+        logger.error(
+            "Discord bot token not set. Add BOT__TOKEN=<your-token> to your .env file."
+        )
+        return 1
+
+    if not settings.llm.api_key:
+        logger.warning(
+            "LLM API key not set (LLM__API_KEY). "
+            "The bot will start but /ask will fail until this is configured."
+        )
+
+    from dragonwizard.bot import DragonWizardBot
+
+    bot = DragonWizardBot(settings)
+    logger.info(f"Starting {settings.bot.name}...")
+    # log_handler=None: disable discord.py's default logging setup and use ours
+    bot.run(settings.bot.token, log_handler=None)
+    return 0
 
 
 async def cmd_ingest(args, settings: Settings) -> int:
@@ -141,8 +268,6 @@ async def cmd_ingest(args, settings: Settings) -> int:
     Returns:
         Exit code (0 for success, 1 for error)
     """
-    from dragonwizard.rag.components import RAGComponents
-
     logger = get_logger(__name__)
 
     # Validate source path
@@ -157,9 +282,25 @@ async def cmd_ingest(args, settings: Settings) -> int:
         logger.info(f"Overriding embedding batch size: {args.batch_size}")
 
     try:
+        from dragonwizard.rag.sources.pdf.loader import ExtractionMode
+
+        # Resolve enricher and extraction mode from CLI args
+        enricher = _build_enricher(args.enricher, settings)
+        enrichers = [enricher] if enricher is not None else []
+        extraction_mode = ExtractionMode(args.extraction_mode)
+
+        # Override collection name if --collection specified
+        rag_settings = settings.rag
+        if args.collection:
+            rag_settings = rag_settings.model_copy(update={"collection_name": args.collection})
+
         # Initialize components via factory
         logger.info("Initializing RAG components...")
-        factory = RAGComponents(settings.rag)
+        logger.info(f"  Extraction mode: {args.extraction_mode}")
+        logger.info(f"  Enricher: {args.enricher}")
+        if args.collection:
+            logger.info(f"  Collection: {args.collection}")
+        factory = RAGComponents(rag_settings)
 
         async with factory.create_embedding_model() as embedding_model, \
                    factory.create_vector_store() as vector_store:
@@ -170,7 +311,12 @@ async def cmd_ingest(args, settings: Settings) -> int:
                 await vector_store.delete_collection()
                 logger.info("Vector store cleared")
 
-            pipeline = factory.create_pipeline(embedding_model, vector_store)
+            pipeline = factory.create_pipeline(
+                embedding_model,
+                vector_store,
+                enrichers=enrichers,
+                extraction_mode=extraction_mode,
+            )
 
             # Progress callback for user feedback
             def progress_callback(message: str):
@@ -202,6 +348,7 @@ async def cmd_ingest(args, settings: Settings) -> int:
                 results = await pipeline.ingest_directory(
                     source_path,
                     recursive=args.recursive,
+                    force=args.force,
                     progress_callback=progress_callback
                 )
 
@@ -236,6 +383,211 @@ async def cmd_ingest(args, settings: Settings) -> int:
         return 1
 
 
+async def cmd_query(args, settings: Settings) -> int:
+    """
+    Query the RAG store with a natural-language question.
+
+    Flow:
+      1. Embed the query with the local Sentence Transformers model
+      2. Search ChromaDB for the top-k most similar chunks
+         (optionally filtered by --edition)
+      3a. With --rag-only: print the chunks with citations and scores
+      3b. Without --rag-only: feed context into LLMOrchestrator and
+          print the LLM's answer with source citations
+
+    The --rag-only mode is useful for validating ingestion quality
+    before spending API tokens — you can see exactly which chunks the
+    retrieval layer is finding for a given question.
+    """
+    logger = get_logger(__name__)
+
+    question: str = args.question
+    edition_filter = {"edition": args.edition} if args.edition else None
+    k = args.k or settings.rag.default_k
+
+    try:
+        rag_settings = settings.rag
+        if args.collection:
+            rag_settings = rag_settings.model_copy(update={"collection_name": args.collection})
+        factory = RAGComponents(rag_settings)
+
+        async with factory.create_embedding_model() as embedding_model, \
+                   factory.create_vector_store() as vector_store:
+
+            engine = factory.create_engine(embedding_model, vector_store)
+
+            logger.info(f"Searching for top {k} chunks" +
+                        (f" (edition: {args.edition})" if args.edition else "") + "...")
+
+            results = await engine.search(
+                query=question,
+                k=k,
+                filters=edition_filter,
+            )
+
+            if not results:
+                print("No relevant results found in the vector store.")
+                print("Tip: Run 'dragonwizard ingest data/raw/pdf --recursive' first.")
+                return 0
+
+            if args.rag_only:
+                edition_note = f"  edition filter: {args.edition}" if args.edition else ""
+                print("\n=== RAG Search Results ===")
+                print(f"Q: {question}")
+                if edition_note:
+                    print(edition_note)
+                print(f"Retrieved: {len(results)} chunks\n")
+
+                for i, result in enumerate(results, start=1):
+                    preview = result.text[:300].replace("\n", " ").strip()
+                    if len(result.text) > 300:
+                        preview += "..."
+                    print(f"[{i}] score={result.score:.3f}  {result.citation}")
+                    print(f"    {preview}\n")
+
+                return 0
+
+            # Full LLM response path
+            from pathlib import Path as _Path
+            from dragonwizard.llm import LLMOrchestrator, LLMError
+
+            system_template_path = _Path(__file__).parent / "prompts" / "system.txt"
+            if not system_template_path.exists():
+                logger.error(f"System prompt template not found: {system_template_path}")
+                return 1
+            system_template = system_template_path.read_text()
+
+            context = engine.format_context(results)
+            orchestrator = LLMOrchestrator(
+                settings=settings.llm,
+                system_template=system_template,
+                # No tool adapter for CLI — dice rolling not wired here yet
+            )
+
+            logger.info(f"Sending to {settings.llm.model}...")
+
+            try:
+                response = await orchestrator.generate_response(
+                    query=question,
+                    context=context,
+                )
+            except LLMError as e:
+                print(f"\nLLM error: {e}", file=sys.stderr)
+                print("Tip: Set LLM__API_KEY in your .env file.", file=sys.stderr)
+                return 1
+
+            edition_note = f" [{args.edition}]" if args.edition else ""
+            print(f"\n=== DragonWizard{edition_note} ===")
+            print(f"Q: {question}\n")
+            print(response.text)
+
+            print(f"\n--- Sources ({len(results)} chunks) ---")
+            for i, result in enumerate(results, start=1):
+                print(f"  [{i}] {result.citation}  (score: {result.score:.3f})")
+
+            if response.tool_calls:
+                print("\n--- Tool Calls ---")
+                for tc in response.tool_calls:
+                    print(f"  {tc.name} → {tc.result}")
+
+            print(f"\nTokens: {response.usage.total_tokens} "
+                  f"(prompt {response.usage.prompt_tokens} "
+                  f"+ completion {response.usage.completion_tokens})")
+
+            return 0
+
+    except Exception as e:
+        logger.error(f"Query failed: {e}", exc_info=True)
+        return 1
+
+
+async def cmd_compare(args, settings) -> int:
+    """
+    Compare retrieval quality across multiple named ChromaDB collections.
+
+    Embeds the query once, then searches each named collection and prints
+    an ASCII side-by-side comparison table.
+
+    Args:
+        args: Parsed arguments (question, collections, k, edition)
+        settings: Application settings
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    logger = get_logger(__name__)
+
+    question: str = args.question
+    collection_names = [c.strip() for c in args.collections.split(",") if c.strip()]
+    k: int = args.k
+    edition_filter = {"edition": args.edition} if args.edition else None
+
+    if not collection_names:
+        logger.error("--collections must contain at least one collection name")
+        return 1
+
+    logger.info(f"Comparing {len(collection_names)} collections for: {question!r}")
+
+    try:
+        # Build a base factory (for the embedding model)
+        base_rag_settings = settings.rag
+        factory = RAGComponents(base_rag_settings)
+
+        collection_results: dict[str, list] = {}
+
+        async with factory.create_embedding_model() as embedding_model:
+            for coll_name in collection_names:
+                try:
+                    # Each collection needs its own vector store
+                    coll_settings = base_rag_settings.model_copy(
+                        update={"collection_name": coll_name}
+                    )
+                    coll_factory = RAGComponents(coll_settings)
+
+                    async with coll_factory.create_vector_store() as vector_store:
+                        engine = coll_factory.create_engine(embedding_model, vector_store)
+                        results = await engine.search(question, k=k, filters=edition_filter)
+                        collection_results[coll_name] = results
+
+                except Exception as e:
+                    logger.warning(f"Failed to search collection {coll_name!r}: {e}")
+                    collection_results[coll_name] = []
+
+        # Print ASCII comparison table
+        col_width = 60
+        separator = "-" * (col_width * len(collection_names) + len(collection_names) + 1)
+
+        print(f"\n=== Compare: {question!r} ===\n")
+        print(f"Collections: {', '.join(collection_names)}  |  k={k}")
+        print(separator)
+
+        # Header row
+        header = " | ".join(name.ljust(col_width) for name in collection_names)
+        print(f"| {header} |")
+        print(separator)
+
+        # Result rows (up to k rows)
+        for rank in range(k):
+            row_parts = []
+            for name in collection_names:
+                results = collection_results.get(name, [])
+                if rank < len(results):
+                    r = results[rank]
+                    preview = r.text[:col_width - 20].replace("\n", " ").strip()
+                    cell = f"[{rank + 1}] {r.score:.2f}  {preview}"
+                else:
+                    cell = "(no result)"
+                row_parts.append(cell.ljust(col_width))
+            print(f"| {' | '.join(row_parts)} |")
+
+        print(separator)
+        return 0
+
+    except Exception as e:
+        logger.error(f"Compare failed: {e}", exc_info=True)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = create_parser()
@@ -261,8 +613,12 @@ def main() -> int:
         return cmd_config(settings)
     elif args.command == "run":
         return cmd_run(settings)
+    elif args.command == "query":
+        return asyncio.run(cmd_query(args, settings))
     elif args.command == "ingest":
         return asyncio.run(cmd_ingest(args, settings))
+    elif args.command == "compare":
+        return asyncio.run(cmd_compare(args, settings))
     else:
         # Default: show help
         parser.print_help()

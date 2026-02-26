@@ -9,8 +9,10 @@ future entry points (Discord bot, etc.).
 from __future__ import annotations
 
 from dragonwizard.config.settings import RAGSettings
+from dragonwizard.rag.base import ChunkEnricher
 from dragonwizard.rag.embeddings import EmbeddingModel
 from dragonwizard.rag.engine import RAGEngine
+from dragonwizard.rag.sources.pdf.loader import ExtractionMode
 from dragonwizard.rag.pipeline import IngestionPipeline
 from dragonwizard.rag.vector_store import ChromaVectorStore
 
@@ -53,12 +55,16 @@ class RAGComponents:
         self,
         embedding_model: EmbeddingModel,
         vector_store: ChromaVectorStore,
+        enrichers: list[ChunkEnricher] | None = None,
+        extraction_mode: ExtractionMode = ExtractionMode.DEFAULT,
     ) -> IngestionPipeline:
         """Create an IngestionPipeline from settings + initialized dependencies."""
         return IngestionPipeline(
             settings=self.settings,
             embedding_model=embedding_model,
             vector_store=vector_store,
+            enrichers=enrichers,
+            extraction_mode=extraction_mode,
         )
 
     def create_engine(

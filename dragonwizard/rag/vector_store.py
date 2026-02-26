@@ -311,8 +311,13 @@ class ChromaVectorStore:
         """
         parts = []
 
-        # Title (always present)
-        parts.append(metadata.title)
+        # Title with optional edition tag, e.g. "Player's Handbook (5e)"
+        title_part = (
+            f"{metadata.title} ({metadata.edition})"
+            if metadata.edition
+            else metadata.title
+        )
+        parts.append(title_part)
 
         # Page number (PDFs only)
         if metadata.page_number:
