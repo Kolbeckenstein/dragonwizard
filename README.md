@@ -2,6 +2,8 @@
 
 A Discord bot that answers D&D 5th Edition rules questions using retrieval-augmented generation (RAG). Ask it anything from spell mechanics to grappling rules — it searches your ingested rulebooks and generates a cited answer via an LLM. It can also roll dice mid-answer.
 
+Note - This is a vibe-coded project created for hobby and personal research reasons.
+
 ## Features
 
 - **`/ask`** — slash command for rules questions; responds with cited sources
