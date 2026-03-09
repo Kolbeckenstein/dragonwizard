@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(cat:*)",
+      "Bash(sudo apt-get update:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(tesseract:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(uv run dragonwizard ingest:*)",
+      "Bash(uv run python:*)",
+      "WebFetch(domain:dnd2024.wikidot.com)",
+      "WebFetch(domain:dnd5e.wikidot.com)",
+      "Bash(uv add:*)"
+    ]
+  }
+}

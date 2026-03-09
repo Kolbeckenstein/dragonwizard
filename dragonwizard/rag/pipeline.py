@@ -226,6 +226,96 @@ class IngestionPipeline:
             logger.error(f"Failed to ingest file {file_path}: {e}")
             raise RuntimeError(f"Ingestion failed for '{file_path}': {e}") from e
 
+    async def ingest_url(
+        self,
+        url: str,
+        session,  # aiohttp.ClientSession — avoid import at module level
+        edition: str | None = None,
+        force: bool = False,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """
+        Fetch and ingest a single URL into the vector store.
+
+        Deduplicates by URL: if the URL has already been ingested and force=False,
+        returns 0 without re-fetching. Deduplication state is stored in the same
+        metadata.json file used by ingest_file(), with keys prefixed by "url:".
+
+        Args:
+            url: Fully-qualified URL to scrape
+            session: Active aiohttp.ClientSession (caller manages lifecycle)
+            edition: D&D edition tag ("5e", "5.5e", or None). If None, chunks are
+                     stored without an edition filter, so they appear in all queries.
+            force: If True, re-ingest even if already recorded in metadata
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Number of chunks ingested (0 if skipped)
+        """
+        if not force and self._is_url_processed(url):
+            logger.info(f"Skipping already-processed URL: {url}")
+            if progress_callback:
+                progress_callback(f"Skipped (already processed): {url}")
+            return 0
+
+        logger.info(f"Ingesting URL: {url}")
+        if progress_callback:
+            progress_callback(f"Fetching: {url}")
+
+        from dragonwizard.rag.sources.web.loader import WebPageLoader
+        loader = WebPageLoader(session)
+        document = await loader.load(url)
+        document.metadata.edition = edition
+
+        logger.info(
+            f"Loaded: {document.metadata.title!r} "
+            f"({len(document.text)} chars, edition={edition})"
+        )
+
+        doc_id = str(uuid.uuid4())
+        count = await self._ingest_document(document, doc_id, progress_callback)
+        self._record_processed_url(url)
+        logger.info(f"Ingested {count} chunks from: {url}")
+        return count
+
+    async def _ingest_document(
+        self,
+        document,  # Document — avoid circular import hint at module level
+        document_id: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> int:
+        """
+        Chunk → Enrich → Embed → Store a pre-loaded Document.
+
+        Extracted from ingest_file() to share with ingest_url() without
+        duplicating the chunk/embed/store logic.
+
+        Args:
+            document: Fully-loaded Document with text and metadata
+            document_id: UUID to group all chunks from this document
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Number of chunks stored
+        """
+        chunks = self._chunk_document(document, document_id)
+        if progress_callback:
+            progress_callback(f"Chunked: {len(chunks)} pieces")
+
+        for enricher in self._enrichers:
+            chunks = await enricher.enrich(chunks, document)
+
+        chunk_texts = [c.text for c in chunks]
+        embeddings = await self.embedding_model.embed(chunk_texts)
+        for chunk, emb in zip(chunks, embeddings):
+            chunk.embedding = emb.tolist()
+
+        await self._insert_chunks(chunks)
+        if progress_callback:
+            progress_callback(f"Stored: {len(chunks)} chunks")
+
+        return len(chunks)
+
     async def ingest_directory(
         self,
         directory_path: Path,
@@ -441,6 +531,55 @@ class IngestionPipeline:
         """
         parent = file_path.parent.name
         return parent if parent in _KNOWN_EDITIONS else None
+
+    def _is_url_processed(self, url: str) -> bool:
+        """
+        Check if a URL has already been ingested.
+
+        Uses the same metadata.json as file deduplication, with keys
+        formatted as "url:<url>" to avoid collisions with file paths.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if the URL is recorded in metadata.json
+        """
+        if not self._metadata_file.exists():
+            return False
+        try:
+            with open(self._metadata_file) as f:
+                metadata = json.load(f)
+            return f"url:{url}" in metadata
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Error reading metadata file: {e}")
+            return False
+
+    def _record_processed_url(self, url: str) -> None:
+        """
+        Record a URL as processed in metadata.json.
+
+        Args:
+            url: URL that was ingested
+        """
+        if self._metadata_file.exists():
+            try:
+                with open(self._metadata_file) as f:
+                    metadata = json.load(f)
+            except json.JSONDecodeError:
+                metadata = {}
+        else:
+            metadata = {}
+
+        metadata[f"url:{url}"] = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "pipeline_version": "0.1.0",
+        }
+
+        with open(self._metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.debug(f"Recorded processed URL: {url}")
 
     def _compute_file_hash(self, file_path: Path) -> str:
         """
