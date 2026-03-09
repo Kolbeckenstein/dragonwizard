@@ -480,6 +480,94 @@ class TestVectorStoreCitations:
         assert "House Rules (" not in citation
 
 
+class TestWebCitations:
+    """Citation formatting for web-sourced chunks (source_type == "web")."""
+
+    @pytest.mark.asyncio
+    async def test_web_citation_includes_url(self, tmp_path):
+        """Web chunk citations should show the source URL for easy verification."""
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="https://dnd5e.wikidot.com/spell:fireball",
+            source_type="web",
+            title="Fireball",
+            chunk_index=0,
+            total_chunks=2,
+            token_count=150,
+            edition="5e",
+        )
+
+        citation = store._format_citation(metadata)
+
+        assert "https://dnd5e.wikidot.com/spell:fireball" in citation
+
+    @pytest.mark.asyncio
+    async def test_web_citation_includes_title_and_edition(self, tmp_path):
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="https://dnd5e.wikidot.com/spell:fireball",
+            source_type="web",
+            title="Fireball",
+            chunk_index=0,
+            total_chunks=2,
+            token_count=150,
+            edition="5e",
+        )
+
+        citation = store._format_citation(metadata)
+
+        assert "Fireball (5e)" in citation
+
+    @pytest.mark.asyncio
+    async def test_web_citation_no_page_number(self, tmp_path):
+        """Web pages don't have page numbers — citation should not say 'p.'."""
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="https://dnd5e.wikidot.com/rogue",
+            source_type="web",
+            title="Rogue",
+            chunk_index=1,
+            total_chunks=4,
+            token_count=100,
+        )
+
+        citation = store._format_citation(metadata)
+
+        assert "p." not in citation
+
+    @pytest.mark.asyncio
+    async def test_web_citation_url_not_shown_for_pdf(self, tmp_path):
+        """PDF citations should NOT show a URL — they show a file path/page."""
+        store = ChromaVectorStore(persist_directory=tmp_path / "db")
+
+        metadata = ChunkMetadata(
+            chunk_id="chunk-1",
+            document_id="doc-1",
+            source_file="data/raw/pdf/5e/phb.pdf",
+            source_type="pdf",
+            title="Player's Handbook",
+            chunk_index=0,
+            total_chunks=10,
+            token_count=100,
+            page_number=42,
+            edition="5e",
+        )
+
+        citation = store._format_citation(metadata)
+
+        # PDF citation should not include the file path in the bracket (only title/page/chunk)
+        assert "https://" not in citation
+
+
 class TestVectorStoreManagement:
     """Test collection management operations."""
 

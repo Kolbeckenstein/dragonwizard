@@ -319,8 +319,12 @@ class ChromaVectorStore:
         )
         parts.append(title_part)
 
+        # URL (web sources only) — lets users click through to verify the source
+        if metadata.source_type == "web":
+            parts.append(metadata.source_file)
+
         # Page number (PDFs only)
-        if metadata.page_number:
+        elif metadata.page_number:
             parts.append(f"p.{metadata.page_number}")
 
         # Section (if available)

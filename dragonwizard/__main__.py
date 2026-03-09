@@ -145,6 +145,47 @@ def create_parser() -> argparse.ArgumentParser:
              "(default: settings collection).",
     )
 
+    # Scrape command
+    scrape_parser = subparsers.add_parser(
+        "scrape",
+        help="Scrape and ingest a website into the RAG vector store",
+    )
+    scrape_parser.add_argument(
+        "url",
+        help="Seed URL to scrape (e.g. https://dnd5e.wikidot.com/)",
+    )
+    scrape_parser.add_argument(
+        "--edition",
+        choices=["5e", "5.5e", "none"],
+        default=None,
+        help="Tag all ingested chunks with this edition. "
+             "Default: auto-detected from URL hostname "
+             "(dnd5e.wikidot.com → 5e, dnd2024.wikidot.com → 5.5e).",
+    )
+    scrape_parser.add_argument(
+        "--delay",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between requests (default: 1.0). "
+             "Use 0 for testing only.",
+    )
+    scrape_parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Stop after ingesting this many pages (default: unlimited).",
+    )
+    scrape_parser.add_argument(
+        "--collection",
+        default=None,
+        help="Override the target ChromaDB collection name.",
+    )
+    scrape_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-scrape URLs that have already been ingested.",
+    )
+
     # Compare command
     compare_parser = subparsers.add_parser(
         "compare",
@@ -501,6 +542,124 @@ async def cmd_query(args, settings: Settings) -> int:
         return 1
 
 
+def _auto_detect_edition(url: str) -> str | None:
+    """
+    Infer the D&D edition from a site's hostname.
+
+    Known mappings:
+        dnd5e.wikidot.com   → "5e"   (2014 rules)
+        dnd2024.wikidot.com → "5.5e" (2024 rules)
+
+    Returns None for unrecognised hosts, leaving chunks unfiltered.
+    """
+    from urllib.parse import urlparse
+    host = urlparse(url).netloc.lower()
+    if "dnd5e.wikidot.com" in host:
+        return "5e"
+    if "dnd2024.wikidot.com" in host:
+        return "5.5e"
+    return None
+
+
+async def cmd_scrape(args, settings: Settings) -> int:
+    """
+    Crawl a website via BFS and ingest each page into the RAG vector store.
+
+    Uses WikidotScraper for URL discovery and IngestionPipeline.ingest_url()
+    for per-page fetch + chunk + embed + store. Can be run independently of
+    the PDF/file ingest pipeline — all it needs is the URL and a collection.
+
+    Args:
+        args: Parsed arguments (url, edition, delay, max_pages, collection, force)
+        settings: Application settings
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    import aiohttp
+    from dragonwizard.rag.sources.web.scraper import WikidotScraper
+
+    logger = get_logger(__name__)
+
+    # Resolve edition: CLI override > auto-detect > None
+    if args.edition == "none":
+        edition: str | None = None
+    elif args.edition is not None:
+        edition = args.edition
+    else:
+        edition = _auto_detect_edition(args.url)
+
+    edition_label = edition or "untagged"
+    logger.info(f"Scraping: {args.url}")
+    logger.info(f"  Edition: {edition_label}")
+    logger.info(f"  Delay: {args.delay}s between requests")
+    if args.max_pages:
+        logger.info(f"  Max pages: {args.max_pages}")
+
+    try:
+        rag_settings = settings.rag
+        if args.collection:
+            rag_settings = rag_settings.model_copy(update={"collection_name": args.collection})
+            logger.info(f"  Collection: {args.collection}")
+
+        factory = RAGComponents(rag_settings)
+
+        async with factory.create_embedding_model() as embedding_model, \
+                   factory.create_vector_store() as vector_store:
+
+            pipeline = factory.create_pipeline(embedding_model, vector_store)
+            scraper = WikidotScraper(
+                args.url,
+                delay=args.delay,
+                max_pages=args.max_pages,
+            )
+
+            total_pages = 0
+            total_chunks = 0
+            skipped = 0
+            start_time = time.time()
+
+            async with aiohttp.ClientSession() as session:
+                async for url in scraper.discover_urls(session):
+                    try:
+                        count = await pipeline.ingest_url(
+                            url,
+                            session,
+                            edition=edition,
+                            force=args.force,
+                        )
+                        total_pages += 1
+                        if count == 0:
+                            skipped += 1
+                            logger.info(f"  Skipped (already ingested): {url}")
+                        else:
+                            total_chunks += count
+                            logger.info(f"  [{total_pages}] {count} chunks — {url}")
+                    except Exception as e:
+                        logger.warning(f"  Failed: {url} — {e}")
+
+            elapsed = time.time() - start_time
+            new_pages = total_pages - skipped
+
+            logger.info("\n=== Scrape Complete ===")
+            logger.info(f"Seed URL: {args.url}")
+            logger.info(f"Edition:  {edition_label}")
+            logger.info(f"Pages visited:   {total_pages}")
+            logger.info(f"Pages ingested:  {new_pages}")
+            logger.info(f"Pages skipped:   {skipped}")
+            logger.info(f"Total chunks:    {total_chunks}")
+            logger.info(f"Time elapsed:    {elapsed:.1f}s")
+
+            stats = await vector_store.get_stats()
+            logger.info(f"\nVector store: {stats['document_count']} total documents")
+
+        return 0
+
+    except Exception as e:
+        logger.error(f"Scrape failed: {e}", exc_info=True)
+        return 1
+
+
 async def cmd_compare(args, settings) -> int:
     """
     Compare retrieval quality across multiple named ChromaDB collections.
@@ -619,6 +778,8 @@ def main() -> int:
         return asyncio.run(cmd_ingest(args, settings))
     elif args.command == "compare":
         return asyncio.run(cmd_compare(args, settings))
+    elif args.command == "scrape":
+        return asyncio.run(cmd_scrape(args, settings))
     else:
         # Default: show help
         parser.print_help()
